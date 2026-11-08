@@ -189,6 +189,18 @@ tests/          validación física (pytest)
 - **RM**: las ecuaciones de espín-eco e inversión-recuperación coinciden con
   la integración numérica de Bloch (1e-6); STIR anula la grasa.
 
+## Comparación con otros simuladores
+
+[docs/comparativa_simuladores.md](docs/comparativa_simuladores.md) compara
+wavesim con los simuladores de referencia de cada modalidad: k-Wave, SimSonic,
+Field II, openEMS, Meep, gprMax, MCX, GATE, ASTRA, KomaMRI, JEMRIS, EIDORS y
+los fantomas XCAT/Virtual Population. Explica qué hace mejor cada uno, cuándo
+usar otro en lugar de wavesim y cómo validarlo contra ellos. Incluye una primera
+comparación numérica con k-Wave en dos capas fluidas: los coeficientes de
+reflexión y transmisión coinciden entre ambos códigos a ±0.3 %. El script es
+`benchmarks/kwave_comparison.py` y requiere `pip install k-wave-python scipy`,
+que no son dependencias del proyecto.
+
 ## Precisión de los datos y limitaciones
 
 - **Fuentes**: las tablas se transcribieron de la literatura (no había
