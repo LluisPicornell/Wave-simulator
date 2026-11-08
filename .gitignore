@@ -10,3 +10,5 @@ venv/
 # Resultados generados por los ejemplos y datasets
 outputs/
 .ruff_cache/
+# Copias de trabajo temporales de los agentes
+.claude/worktrees/
