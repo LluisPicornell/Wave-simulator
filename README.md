@@ -18,7 +18,7 @@ malla exigiría unos 10¹⁰ puntos por milímetro).
 |---|---|---|
 | **Ultrasonido** (0.5-15 MHz) | Elastodinámica completa: ondas P y S, conversión de modo en el hueso, reflexión y refracción según la impedancia, atenuación viscoelástica ∝ f (GSLS), speckle por microestructura, rugosidad de las superficies. FDTD de 4.º orden con bordes CPML. | `wavesim.ultrasound` |
 | **Radio y microondas** (10 MHz-300 GHz) | Ecuaciones de Maxwell (FDTD, modo TM) con la permitividad y conductividad reales de cada tejido (modelo Cole-Cole de Gabriel 1996). Da el campo, la penetración y el SAR. | `wavesim.em.fdtd_tm` |
-| **Baja frecuencia** (< 10 MHz) | Régimen cuasi-estático: sólo atenuación analítica (sin solver de imagen todavía). | `wavesim.em.spectrum` |
+| **Baja frecuencia** (< 10 MHz) | Régimen cuasi-estático: div(σ* ∇φ) = 0 con la admitividad compleja de Gabriel, flujo nulo hacia el aire y electrodos en la piel. Da potencial, densidad de corriente, tensiones de borde y una reconstrucción de diferencias de un paso (tomografía de impedancia eléctrica, EIT). | `wavesim.em.quasistatic` |
 | **Terahercios, IR, visible, UV** | Transporte de luz: difusión (cuando domina el *scattering*) o atenuación balística (cuando domina la absorción del agua). | `wavesim.em.optics` |
 | **Rayos X y gamma** (10 keV-10 MeV) | Beer-Lambert con coeficientes NIST/ICRU-44, espectro de tubo, endurecimiento del haz, ruido de Poisson. Radiografía y TAC (FBP). | `wavesim.em.xray` |
 | **Resonancia magnética** | No es una onda que atraviesa el cuerpo, sino la señal de los protones (T1, T2, PD). Ecuaciones de señal validadas con un simulador de Bloch, adquisición en k-space y ruido. Secuencias T1, T2, DP-FS, STIR, GRE y UTE. | `wavesim.mri` |
@@ -91,6 +91,7 @@ Cada script guarda sus figuras en `outputs/`:
 | `examples/07_resonancia.py` | La misma pierna con seis secuencias de RM |
 | `examples/08_luz.py` | Luz de 450 a 1450 nm a través del antebrazo |
 | `examples/09_generar_dataset.py` | Dataset etiquetado para entrenar una red neuronal |
+| `examples/10_impedancia_eit.py` | EIT de una pierna a 50 kHz con 16 electrodos: potencial y densidad de corriente sana vs fracturada, cambio de tensiones de borde y reconstrucción de diferencias |
 
 ### Resultado principal: ¿qué atraviesa un antebrazo de ~47 mm?
 
@@ -138,6 +139,16 @@ fractura con su edema y hematoma cambia el campo una mediana de 1.5 dB a
 2.45 GHz, pero con una resolución de centímetros.
 
 ![Penetración en todo el espectro](docs/img/04_penetracion.png)
+
+### Impedancia eléctrica (baja frecuencia)
+
+A 50 kHz la corriente atraviesa la pierna sin problema, pero su resolución es
+de ~1 cm. En `10_impedancia_eit.py` el hematoma de la fractura cambia hasta un
+~40 % algunas tensiones de borde (~13 % de la tensión máxima), y la
+reconstrucción lo localiza con un error de ~6 mm. Sirve para detectar y
+localizar de forma aproximada, no para ver la grieta. Además, en una medida
+real el ruido y la impedancia de contacto de los electrodos (aquí no
+modelada) dificultan medir cambios pequeños.
 
 ## Estructura
 
@@ -200,7 +211,6 @@ tests/          validación física (pytest)
 ## Próximos pasos posibles
 
 - 3D (necesita GPU: CuPy, JAX o Numba-CUDA).
-- Solver cuasi-estático (tomografía de impedancia eléctrica) para < 10 MHz.
 - Monte Carlo de fotones para la óptica, scatter en rayos X.
 - Hueso anisótropo y poroso, callo de consolidación, otras anatomías.
 - Entrenamiento de la red neuronal (PyTorch) sobre los datasets generados.
