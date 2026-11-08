@@ -15,6 +15,32 @@ def resample_mask(phantom: Phantom, mask: np.ndarray, x: np.ndarray, z: np.ndarr
     return mask[np.ix_(jj, ii)]
 
 
+def resample_mask_apparent_depth(phantom: Phantom, mask: np.ndarray, x: np.ndarray, z: np.ndarray,
+                                 z_probe: float, c0: float = 1540.0) -> np.ndarray:
+    """Lleva una máscara a la malla de una ecografía, en profundidad *aparente*.
+
+    El ecógrafo convierte tiempo en profundidad con una velocidad fija ``c0``:
+    un punto a profundidad real ``z`` aparece en ``z_probe + c0·∫ dz'/c(z')``
+    (trayecto vertical desde la sonda). Sin esta corrección la máscara queda
+    desplazada respecto a los ecos (p. ej. ~0.2 mm a 8 mm de profundidad en agua).
+    """
+    from .materials.acoustic import ACOUSTIC
+
+    g = phantom.grid
+    c = phantom.property_map(lambda k: ACOUSTIC[k].c_p)
+    j0 = int(np.clip(round((z_probe - g.z0) / g.dx), 0, g.nz - 1))
+    travel = np.cumsum(g.dx / c, axis=0)
+    z_app = z_probe + c0 * (travel - travel[j0][None, :])
+    rows = np.arange(g.nz)
+    ii = np.clip(np.round((x - g.x0) / g.dx).astype(int), 0, g.nx - 1)
+    out = np.zeros((z.size, x.size), dtype=mask.dtype)
+    for col, i in enumerate(ii):
+        # z_app crece monótonamente con la profundidad real: se invierte por interpolación
+        j = np.clip(np.round(np.interp(z, z_app[:, i], rows)).astype(int), 0, g.nz - 1)
+        out[:, col] = mask[j, i]
+    return out
+
+
 def dilate(mask: np.ndarray, radius_px: int) -> np.ndarray:
     """Dilatación binaria con un cuadrado de lado 2r+1 (sin SciPy)."""
     out = mask.copy()
