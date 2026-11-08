@@ -87,6 +87,9 @@ class ElasticSolver:
         atenuación; 1 es suficiente para pulsos de banda moderada).
       - ``scattering``: escala de la heterogeneidad que produce speckle.
       - ``cfl``: fracción del paso temporal máximo estable.
+      - ``backend``: "numpy" (referencia), "numba" (kernels fusionados y
+        paralelos de ``_numba_kernels``; error si Numba no está instalado o si
+        ``dtype`` no es float32) o "auto" (Numba si está disponible, si no NumPy).
     """
 
     def __init__(
@@ -100,7 +103,9 @@ class ElasticSolver:
         cfl: float = 0.9,
         medium: ElasticMedium | None = None,
         dtype=np.float32,
+        backend: str = "auto",
     ):
+        self.backend = self._resolve_backend(backend, dtype)
         self.phantom = phantom
         self.grid = phantom.grid
         self.f0 = f0
@@ -147,9 +152,15 @@ class ElasticSolver:
         shape = self.grid.shape
         z = lambda: np.zeros(shape, dtype)  # noqa: E731
         self.vx, self.vz, self.sxx, self.szz, self.sxz = z(), z(), z(), z(), z()
-        self.rxx = [z() for _ in range(L)]
-        self.rzz = [z() for _ in range(L)]
-        self.rxz = [z() for _ in range(L)]
+        if self.backend == "numba":
+            # Los kernels necesitan las memorias en una pila (L, nz, nx); las
+            # listas son vistas de ella para que el resto del código no cambie
+            self._mem = {k: np.zeros((L, *shape), dtype) for k in ("rxx", "rzz", "rxz")}
+            self.rxx, self.rzz, self.rxz = (list(self._mem[k]) for k in ("rxx", "rzz", "rxz"))
+        else:
+            self.rxx = [z() for _ in range(L)]
+            self.rzz = [z() for _ in range(L)]
+            self.rxz = [z() for _ in range(L)]
         # Un buffer por derivada: sus bordes nunca escritos permanecen a cero
         self.d = {k: z() for k in ("sxx_x", "sxz_z", "sxz_x", "szz_z", "exx", "ezz", "exz_a", "exz_b")}
         self.acc, self.acc2, self.acc3, self.div, self.exz = z(), z(), z(), z(), z()
@@ -171,6 +182,48 @@ class ElasticSolver:
         self.sources: list[Source] = []
         self.receivers: dict[str, Receiver] = {}
         self.cp_local = m.cp
+        if self.backend == "numba":
+            self._init_numba()
+
+    @staticmethod
+    def _resolve_backend(backend: str, dtype) -> str:
+        if backend not in ("auto", "numpy", "numba"):
+            raise ValueError(f"backend desconocido '{backend}' (use 'auto', 'numpy' o 'numba')")
+        if backend == "numpy":
+            return "numpy"
+        try:
+            import numba  # noqa: F401
+        except ImportError:
+            if backend == "numba":
+                raise ImportError(
+                    "El backend 'numba' requiere Numba: instálalo con `pip install wavesim[fast]` "
+                    "o usa backend='numpy'."
+                ) from None
+            return "numpy"
+        if np.dtype(dtype) != np.float32:
+            # Los kernels están escritos y probados sólo para float32
+            if backend == "numba":
+                raise ValueError("El backend 'numba' sólo admite dtype=np.float32")
+            return "numpy"
+        return "numba"
+
+    def _init_numba(self) -> None:
+        """Prepara los argumentos de los kernels (se importan aquí: Numba es opcional)."""
+        from . import _numba_kernels as nk
+
+        self._nk = nk
+        f32 = np.float32
+        self._nb_c1 = f32(C1 * self.inv_dx)
+        self._nb_c2 = f32(C2 * self.inv_dx)
+        self._nb_pml = {k: nk.pack_pml(v) for k, v in self.pml.items()}
+        if self.n_mech:
+            relax = (self.dt_pi_t, self.dt_mu2_t, self.dt_mu_t_xz)
+            self._nb_mem = (np.asarray(self.mem_a, np.float64), np.asarray(self.mem_b, np.float64))
+        else:
+            # Marcadores de posición: con n_mech = 0 el kernel no los lee
+            relax = (np.zeros((1, 1), self.dtype),) * 3
+            self._nb_mem = (np.zeros(0), np.zeros(0))
+        self._nb_relax = relax
 
     # ------------------------------------------------------------------
     def _check_sampling(self, dx: float) -> None:
@@ -219,8 +272,46 @@ class ElasticSolver:
         self.pml[name].apply(out)
         return out
 
+    def _apply_force_sources(self, n: int) -> None:
+        for s in self.sources:
+            if s.kind in ("force_x", "force_z"):
+                # Fuente de fuerza aditiva: emite ~``vals`` m/s de velocidad de partícula
+                target = self.vx if s.kind == "force_x" else self.vz
+                inc = s.signals[s.channel, n] * (2.0 * self.cp_local[s.j, s.i] * self.dt * self.inv_dx)
+                np.add.at(target, (s.j, s.i), inc)
+
+    def _apply_pressure_sources(self, n: int) -> None:
+        for s in self.sources:
+            if s.kind == "pressure":
+                vals = s.signals[s.channel, n]
+                # Fuente de presión aditiva: emite ~``vals`` Pa hacia cada lado
+                inc = vals * (2.0 * self.cp_local[s.j, s.i] * self.dt * self.inv_dx)
+                np.subtract.at(self.sxx, (s.j, s.i), inc)
+                np.subtract.at(self.szz, (s.j, s.i), inc)
+
+    def _step_numba(self, n: int) -> None:
+        """Mismo paso que ``step`` con dos barridos fusionados; fuentes en NumPy."""
+        nk, pml = self._nk, self._nb_pml
+        nk.velocity_kernel(
+            self.vx, self.vz, self.sxx, self.szz, self.sxz, self.dtbx, self.dtbz,
+            self._nb_c1, self._nb_c2,
+            pml["sxx_x"], pml["sxz_z"], pml["sxz_x"], pml["szz_z"],
+        )  # fmt: skip
+        self._apply_force_sources(n)
+        nk.stress_kernel(
+            self.vx, self.vz, self.sxx, self.szz, self.sxz,
+            self._mem["rxx"], self._mem["rzz"], self._mem["rxz"],
+            self.dt_pi, self.dt_mu2, self.dt_mu_xz, *self._nb_relax, *self._nb_mem,
+            self.has_shear, self._nb_c1, self._nb_c2,
+            pml["exx"], pml["ezz"], pml["exz_a"], pml["exz_b"],
+        )  # fmt: skip
+        self._apply_pressure_sources(n)
+
     def step(self, n: int) -> None:
         """Avanza un paso: velocidades a t+dt/2 y tensiones a t+dt."""
+        if self.backend == "numba":
+            self._step_numba(n)
+            return
         d = self._deriv
         acc = self.acc
         # --- velocidades
@@ -234,12 +325,7 @@ class ElasticSolver:
         np.add(a, b, out=acc)
         acc *= self.dtbz
         self.vz += acc
-        for s in self.sources:
-            if s.kind in ("force_x", "force_z"):
-                # Fuente de fuerza aditiva: emite ~``vals`` m/s de velocidad de partícula
-                target = self.vx if s.kind == "force_x" else self.vz
-                inc = s.signals[s.channel, n] * (2.0 * self.cp_local[s.j, s.i] * self.dt * self.inv_dx)
-                np.add.at(target, (s.j, s.i), inc)
+        self._apply_force_sources(n)
 
         # --- deformaciones
         exx = d("exx", self.vx, 1, False)
@@ -277,13 +363,7 @@ class ElasticSolver:
                 for l in range(self.n_mech):
                     self._memory(self.sxz, self.rxz[l], f_xx, l, a2)
 
-        for s in self.sources:
-            if s.kind == "pressure":
-                vals = s.signals[s.channel, n]
-                # Fuente de presión aditiva: emite ~``vals`` Pa hacia cada lado
-                inc = vals * (2.0 * self.cp_local[s.j, s.i] * self.dt * self.inv_dx)
-                np.subtract.at(self.sxx, (s.j, s.i), inc)
-                np.subtract.at(self.szz, (s.j, s.i), inc)
+        self._apply_pressure_sources(n)
 
     def _memory(self, stress, r, forcing, l, tmp):
         """sigma += (r_new + r_old)/2 ;  r_new = A r_old - B F  (Crank-Nicolson)."""
