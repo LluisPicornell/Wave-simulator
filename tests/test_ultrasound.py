@@ -167,3 +167,31 @@ def test_envelope_of_pulse_peaks_at_center():
     t = np.arange(2000) * 1e-8
     p = gaussian_pulse(t, 1e6, t0=8e-6)
     assert t[np.argmax(envelope(p))] == pytest.approx(8e-6, abs=2e-8)
+
+
+def test_speckle_level_is_independent_of_cell_size():
+    # La heterogeneidad es ruido blanco por celda: sin normalizar por dx, el speckle
+    # retrodispersado bajaba ~6 dB al afinar la malla a la mitad.
+    f0 = 1.5e6
+    rms = {}
+    for ppw in (8, 16):
+        dx = 1450 / f0 / ppw
+        g = Grid2D.from_size(12e-3, 14e-3, dx, x0=-6e-3)
+        lab = np.full(g.shape, TISSUE_INDEX["water"], np.int16)
+        lab[g.z >= 5e-3, :] = TISSUE_INDEX["muscle"]
+        levels = []
+        for seed in range(6):
+            het = np.random.default_rng(seed).standard_normal(g.shape).astype(np.float32)
+            solver = ElasticSolver(Phantom(g, lab, heterogeneity=het), f0, n_mechanisms=0)
+            nt = int(14e-6 / solver.dt)
+            t = solver.time_axis(nt)
+            j = g.index_of(0, 2.5e-3)[0]
+            solver.add_source(Source(np.full(g.nx, j), np.arange(g.nx), np.zeros(g.nx, int),
+                                     gaussian_pulse(t, f0)[None, :]))
+            solver.add_receiver("r", line_receiver(g, 2.5e-3, -3e-3, 3e-3))
+            trace = solver.run(nt, track_peak=False).traces["r"]
+            # ecos de 8-11 mm de profundidad: speckle del músculo, sin la interfaz
+            w = (t > 2 * (8e-3 - 2.5e-3) / 1540) & (t < 2 * (11e-3 - 2.5e-3) / 1540)
+            levels.append(np.sqrt(np.mean(trace[:, w] ** 2)))
+        rms[ppw] = np.mean(levels)
+    assert abs(20 * np.log10(rms[8] / rms[16])) < 1.5

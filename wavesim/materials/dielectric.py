@@ -8,7 +8,8 @@ spectrum of tissues", Phys. Med. Biol. 41, 2271 (1996):
 
 Válido aproximadamente entre 10 Hz y 100 GHz. Por encima, la absorción la
 domina el agua y se usa el modelo de doble Debye del agua (Kindt &
-Schmuttenmaer 1996), escalado por la fracción de agua del tejido.
+Schmuttenmaer 1996), escalado por una fracción de agua *efectiva* que se
+calcula para que el modelo sea continuo en 100 GHz (ver ``water_fraction``).
 
 Convención: ``eps = eps' - j eps''`` y conductividad efectiva
 ``sigma = w eps0 eps''`` (incluye las pérdidas dieléctricas).
@@ -17,6 +18,7 @@ Convención: ``eps = eps' - j eps''`` y conductividad efectiva
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import numpy as np
 
@@ -85,21 +87,6 @@ MIXTURES: dict[str, tuple[tuple[str, float], ...]] = {
     "edema": (("marrow", 0.6), ("blood", 0.4)),
 }
 
-# Fracción de agua en volumen, usada por encima de 100 GHz (aprox., Duck 1990).
-WATER_FRACTION: dict[str, float] = {
-    "water": 1.0,
-    "air": 0.0,
-    "skin": 0.65,
-    "fat": 0.15,
-    "muscle": 0.75,
-    "blood": 0.80,
-    "cortical_bone": 0.12,
-    "trabecular_bone": 0.25,
-    "marrow": 0.15,
-    "hematoma": 0.78,
-    "edema": 0.45,
-}
-
 GABRIEL_MAX_FREQ = 100e9
 
 
@@ -114,20 +101,51 @@ def water_double_debye(f_hz):
     return eps_inf + (eps_s - eps_2) / (1 + 1j * w * tau1) + (eps_2 - eps_inf) / (1 + 1j * w * tau2)
 
 
+def _gabriel(key: str, f):
+    """Permitividad de Gabriel (con mezclas) sin extrapolar al régimen del agua."""
+    if key in MIXTURES:
+        return sum(frac * _gabriel(k, f) for k, frac in MIXTURES[key])
+    return COLE_COLE[key].complex_permittivity(f)
+
+
+@lru_cache(maxsize=None)
+def _high_frequency_terms(key: str) -> tuple[float, float]:
+    """``(wf, dry)``: fracción de agua efectiva y permitividad seca real por encima de 100 GHz.
+
+    Una tabla fija de fracciones de agua (Duck 1990) deja un salto de hasta 3x en
+    la absorción al cambiar de modelo en 100 GHz (la grasa pasaba de 392 a
+    1153 Np/m). En su lugar se exige continuidad en ``GABRIEL_MAX_FREQ``:
+
+    * parte imaginaria: ``wf = Im eps_Gabriel / Im eps_agua``, recortada a [0, 1];
+    * parte real: el resto del tejido se aproxima por un término seco real
+      ``dry`` ajustado para que ``wf*Re eps_agua + (1-wf)*dry = Re eps_Gabriel``.
+      Absorbe también la diferencia entre el Debye del tejido y el doble Debye del
+      agua; no es un valor físico de la materia seca (cuando ``wf = 1`` no se puede
+      ajustar y la parte real queda con el del agua).
+    """
+    eps_g = complex(_gabriel(key, GABRIEL_MAX_FREQ))
+    eps_w = complex(water_double_debye(GABRIEL_MAX_FREQ))
+    wf = float(np.clip(eps_g.imag / eps_w.imag, 0.0, 1.0))
+    dry = (eps_g.real - wf * eps_w.real) / (1.0 - wf) if wf < 1.0 else 0.0
+    return wf, dry
+
+
+def water_fraction(key: str) -> float:
+    """Fracción de agua efectiva del tejido, la que hace continua la absorción en 100 GHz."""
+    return _high_frequency_terms(key)[0]
+
+
 def complex_permittivity(key: str, f_hz):
     """Permitividad relativa compleja ``eps' - j eps''`` del tejido ``key``.
 
     Por debajo de 100 GHz usa Gabriel 1996. Por encima, la del agua escalada
-    por la fracción de agua del tejido (el agua domina la absorción en THz).
+    por la fracción de agua efectiva del tejido más un término seco real; ambos
+    se calibran para que la permitividad sea continua en 100 GHz.
     """
     f = np.asarray(f_hz, dtype=float)
-    if key in MIXTURES:
-        return sum(frac * complex_permittivity(k, f) for k, frac in MIXTURES[key])
-    model = COLE_COLE[key]
-    eps = model.complex_permittivity(f)
+    eps = _gabriel(key, f)
     if np.any(f > GABRIEL_MAX_FREQ):
-        wf = WATER_FRACTION[key]
-        dry = 2.5 if key != "air" else 1.0
+        wf, dry = _high_frequency_terms(key)
         high = wf * water_double_debye(f) + (1.0 - wf) * dry
         eps = np.where(f > GABRIEL_MAX_FREQ, high, eps)
     return eps

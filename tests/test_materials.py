@@ -5,9 +5,32 @@ from wavesim.materials import ACOUSTIC, TISSUES, dielectric, mri, optical, xray
 from wavesim.ultrasound.medium import SCATTER_STRENGTH
 
 
-@pytest.mark.parametrize("table", [ACOUSTIC, mri.MRI, optical.OPTICAL, dielectric.WATER_FRACTION, SCATTER_STRENGTH])
+@pytest.mark.parametrize("table", [ACOUSTIC, mri.MRI, optical.OPTICAL, SCATTER_STRENGTH])
 def test_every_tissue_has_properties(table):
     assert set(TISSUES) <= set(table)
+
+
+def test_water_fraction_is_effective_and_bounded():
+    for k in TISSUES:
+        wf = dielectric.water_fraction(k)
+        assert 0.0 <= wf <= 1.0
+    assert dielectric.water_fraction("air") == 0.0
+    # los tejidos con más agua tienen mayor fracción efectiva
+    assert dielectric.water_fraction("fat") < dielectric.water_fraction("skin") < dielectric.water_fraction("muscle")
+
+
+@pytest.mark.parametrize("tissue", list(TISSUES))
+def test_penetration_is_continuous_across_100ghz(tissue):
+    # el cambio de modelo (Gabriel -> agua escalada) no debe crear un salto artificial
+    lo = dielectric.penetration_depth(tissue, 99.9e9)
+    hi = dielectric.penetration_depth(tissue, 100.1e9)
+    if not np.isfinite(lo):  # aire: sin pérdidas
+        assert not np.isfinite(hi)
+    else:
+        assert abs(hi - lo) / lo < 0.05
+        eps_lo = complex(dielectric.complex_permittivity(tissue, 99.9e9))
+        eps_hi = complex(dielectric.complex_permittivity(tissue, 100.1e9))
+        assert eps_hi.real == pytest.approx(eps_lo.real, rel=0.02) or dielectric.water_fraction(tissue) == 1.0
 
 
 def test_dielectric_and_xray_cover_all_tissues():
