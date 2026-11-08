@@ -48,8 +48,17 @@ puede comparar una modalidad con otra sobre el mismo "paciente".
 ## Instalación
 
 ```bash
-pip install -e ".[dev]"     # numpy, matplotlib (+ pytest para los tests)
+pip install -e ".[dev]"         # numpy, matplotlib (+ pytest para los tests)
+pip install -e ".[dev,fast]"    # además Numba: ultrasonido ~1.6-3x más rápido
 ```
+
+**Backend rápido opcional (Numba).** El solver elástico usa por defecto
+`backend="auto"`: kernels Numba fusionados y paralelos si Numba está instalado,
+y NumPy si no. Ambos dan el mismo resultado (los tests los comparan).
+`backend="numpy"` fuerza la referencia; `backend="numba"` falla con un error
+claro si falta Numba. Sólo admite float32. La primera ejecución compila los
+kernels (unos segundos, luego quedan en caché) y el número de hilos se
+controla con `NUMBA_NUM_THREADS`.
 
 ## Uso rápido
 
@@ -185,11 +194,12 @@ tests/          validación física (pytest)
 - Microondas en banda estrecha (propiedades a la frecuencia central).
 - Hueso isótropo (el real es anisótropo y poroso). Acústica lineal.
 - Rendimiento: una ecografía de 3 MHz y 24×22 mm con 3 ángulos tarda ~1 min
-  en una CPU. A 7-10 MHz la malla crece mucho (varios minutos o más).
+  en una CPU con NumPy (Numba lo acelera ~1.6x con 1 hilo y ~3x con 4). A
+  7-10 MHz la malla crece mucho (varios minutos o más).
 
 ## Próximos pasos posibles
 
-- 3D (necesita GPU: CuPy, JAX o Numba-CUDA) y aceleración con Numba en CPU.
+- 3D (necesita GPU: CuPy, JAX o Numba-CUDA).
 - Solver cuasi-estático (tomografía de impedancia eléctrica) para < 10 MHz.
 - Monte Carlo de fotones para la óptica, scatter en rayos X.
 - Hueso anisótropo y poroso, callo de consolidación, otras anatomías.
