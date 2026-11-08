@@ -19,29 +19,27 @@ comparación numérica con k-Wave.
   openems.de **no eran accesibles** (fallo de DNS o conexión rechazada por el
   proxy). Los datos de esos proyectos proceden de fragmentos del buscador y de
   páginas espejo; por eso hay varias licencias en **[?]**.
-- **Estado real de wavesim en esta copia del repositorio.** El encargo
-  mencionaba una EIT cuasi-estática y aceleración Numba. **No existen en esta
-  copia**: `wavesim/em/` contiene `fdtd_tm.py` (Maxwell TM), `optics.py`
-  (difusión y balístico), `projection.py` (Radon/FBP), `spectrum.py` y
-  `xray.py`; no hay ninguna referencia a EIT ni a Numba en `wavesim/`, y el
-  README lo lista como "próximos pasos". Aquí se compara lo que existe. Para
-  EIT sólo se describen los simuladores de referencia y cómo se validaría un
-  futuro módulo.
+- **Versión de wavesim comparada.** El análisis se hizo sobre una versión
+  anterior y se actualizó después para incluir lo añadido en paralelo: el
+  solver cuasi-estático de impedancia eléctrica (`wavesim.em.quasistatic`), el
+  backend Numba opcional del solver elástico y las correcciones de la revisión
+  (transmisión EM coherente, contorno de Robin en óptica, speckle
+  independiente de la malla).
 - **Fecha.** Noviembre de 2026. Versiones y licencias pueden haber cambiado.
 
 ## 1. Qué es wavesim (resumen honesto)
 
-Paquete Python + NumPy (sin GPU, sin Numba), 2D, con un solo conjunto de
+Paquete Python + NumPy (Numba opcional en CPU, sin GPU), 2D, con un solo conjunto de
 fantomas de extremidad con fractura compartido por todas las modalidades:
 
 | Modalidad | Qué resuelve realmente | Límites principales |
 |---|---|---|
-| Ultrasonido | FDTD elástico velocidad-tensión, 4.º orden en espacio, leapfrog de 2.º orden, CPML, atenuación GSLS con "método tau" (1 mecanismo por defecto; el README da ±12 % de ajuste a la ley ∝ f en la banda del pulso), speckle por fluctuación de densidad, rugosidad de interfaces | 2D, CPU, float32, hueso isótropo, acústica lineal, tejidos blandos como fluido (`mu = 0`) |
+| Ultrasonido | FDTD elástico velocidad-tensión, 4.º orden en espacio, leapfrog de 2.º orden, CPML, atenuación GSLS con "método tau" (1 mecanismo por defecto, con hasta ~14 % de error frente a la ley ∝ f en la banda del pulso; ~1 % con 2 mecanismos), speckle por fluctuación de densidad, rugosidad de interfaces | 2D, CPU, float32, hueso isótropo, acústica lineal, tejidos blandos como fluido (`mu = 0`) |
 | Maxwell | FDTD de Yee 2D modo TM, CPML, onda continua y fasor por DFT, propiedades Cole-Cole (Gabriel 1996) a la frecuencia central, SAR | banda estrecha (sin dispersión dentro del pulso), 2D TM, sin antenas ni fuentes realistas |
-| Óptica | Difusión estacionaria (diferencias finitas + gradiente conjugado) y atenuación balística | sin Monte Carlo, sin resolución temporal, contorno extrapolado simple |
+| Óptica | Difusión estacionaria (diferencias finitas + gradiente conjugado) y atenuación balística | sin Monte Carlo, sin resolución temporal; contorno extrapolado de Robin (Groenhuis) |
 | Rayos X/TAC | Beer-Lambert con base agua + hueso (NIST/ICRU-44), espectro de tubo de Kramers, endurecimiento, ruido de Poisson, FBP | sin scatter, sin líneas características del W, haz paralelo, 2D |
 | RM | Ecuaciones de señal analíticas (T1, T2, DP, STIR, GRE, UTE) validadas contra un Bloch de isocromatos; k-space recortado y ruido de Rice | no es un simulador de Bloch espacial: sin B0/B1 no uniformes, sin gradientes reales, sin artefactos de desfase |
-| EIT | no existe | |
+| EIT | Cuasi-estático div(σ*∇φ) = 0 con la admitividad compleja de Gabriel, COCG matrix-free, electrodos ideales en la piel, matriz de sensibilidad y reconstrucción de diferencias de un paso (Tikhonov) | 2D, sin impedancia de contacto ni modelo completo de electrodo (CEM), reconstrucción lineal, diferencias finitas en vez de FEM |
 
 Qué lo distingue: **una sola anatomía paramétrica 2D (tibia, antebrazo,
 muslo; cortes longitudinales y transversales), con máscara de verdad de
@@ -94,7 +92,7 @@ simuladores sino usos de los anteriores):
   cortical anisótropa y porosa; en wavesim el corte 2D no reproduce la
   difracción 3D ni las ondas guiadas de un tubo (ver Bossy 2004).
 - **Rapidez y escala.** Sim4Life, k-Wave (CUDA), j-Wave, Stride y Fullwave
-  corren en GPU; wavesim a 3 MHz y 24×22 mm tarda ~1 min en CPU, y a 7-10 MHz
+  corren en GPU; wavesim a 3 MHz y 24×22 mm tarda ~1 min en CPU con NumPy (~1.6-3 veces menos con Numba), y a 7-10 MHz
   minutos o más.
 - **Menos puntos por longitud de onda.** El método pseudoespectral de k-Wave
   permite mallas más gruesas que un FDTD de 4.º orden para la misma
@@ -235,7 +233,7 @@ sobre la misma anatomía que el resto, a segundos por imagen.
 **Cuándo recomendar otra:** artefactos reales (KomaMRI, JEMRIS), diseño de
 secuencias o fantomas cardíacos (MRXCAT).
 
-## 7. Impedancia eléctrica (EIT) – no implementado en wavesim
+## 7. Impedancia eléctrica (EIT)
 
 | Herramienta | Método | 2D/3D | Licencia | Lenguaje | Uso |
 |---|---|---|---|---|---|
@@ -246,6 +244,15 @@ Para fracturas: la bibliografía hallada es experimental (impedancia en
 conejo, placa inteligente, estudios antiguos de Aberdeen con EIT de miembro);
 no se encontró ningún simulador específico de EIT para detección de
 fracturas.
+
+**Frente a `wavesim.em.quasistatic`.** EIDORS y pyEIT trabajan con elementos
+finitos (geometrías curvas, 3D), modelo completo de electrodo con impedancia de
+contacto y algoritmos de reconstrucción establecidos (GREIT, Gauss-Newton
+iterativo, priors). wavesim usa diferencias finitas 2D, electrodos ideales y
+una reconstrucción lineal de un paso: sirve para estimar si la fractura
+(sobre todo su hematoma y edema) cambia de forma medible las tensiones de
+borde, no para reconstrucción cuantitativa. Para eso conviene exportar el
+fantoma y usar EIDORS o pyEIT.
 
 ## 8. Fantomas anatómicos
 
@@ -454,7 +461,7 @@ cuando se vea el ruido de cada caso.
 | Rayos X | Cilindros de agua/hueso/aire con espectro de 80 kVp | NIST XCOM (analítico), MC-GPU o GATE para scatter | HU de cada tejido, cupping, perfil de ruido, RMSE de la FBP con ASTRA/TIGRE, MTF |
 | RM | Mismas T1/T2/PD con SE, IR, GRE | KomaMRI.jl y JEMRIS | Señal por voxel (error relativo < 1 %), PSF, estadística de Rice del ruido |
 | Fantomas | Espesores, fracciones de tejido y radios óseos del corte | Medidas de VP/XCAT (o literatura) | Distribución de espesores; no pretende igualar un sujeto |
-| EIT (futuro) | Disco homogéneo con inclusión | Solución analítica y EIDORS/pyEIT | Tensiones de contorno, condicionamiento |
+| EIT | Disco homogéneo con inclusión | Solución analítica y EIDORS/pyEIT | Tensiones de contorno, condicionamiento |
 
 ### 11.3 Orden de trabajo sugerido
 
