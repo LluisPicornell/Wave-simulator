@@ -39,7 +39,14 @@ muslo). Incluyen:
 - interfaces rugosas (piel, periostio, endostio) y heterogeneidad interna;
 - fracturas transversales, oblicuas, fisuras, conminutas, incompletas y
   desplazadas (escalón cortical);
+- fracturas **internas** que no abren la cortical que mira a la sonda:
+  intracorticales, de la cortical lejana, contusión ósea trabecular
+  (microfracturas y edema, preset `tibia_metafisis`) y fracturas por estrés
+  con reacción perióstica o endóstica;
 - grieta con superficie rugosa, hematoma perióstico y edema de médula;
+- **tipos de cuerpo** (`BODY_TYPES`: delgado, normal, sobrepeso, obeso,
+  musculoso, anciano osteoporótico) que escalan piel, grasa, músculo y hueso
+  según rangos publicados; los datasets los sortean;
 - máscara de verdad de terreno de la fractura (para segmentación).
 
 La misma semilla produce la misma anatomía a cualquier resolución. Así se
@@ -92,6 +99,7 @@ Cada script guarda sus figuras en `outputs/`:
 | `examples/08_luz.py` | Luz de 450 a 1450 nm a través del antebrazo |
 | `examples/09_generar_dataset.py` | Dataset etiquetado para entrenar una red neuronal |
 | `examples/10_impedancia_eit.py` | EIT de una pierna a 50 kHz con 16 electrodos: potencial y densidad de corriente sana vs fracturada, cambio de tensiones de borde y reconstrucción de diferencias |
+| `examples/11_fracturas_internas_baja_frecuencia.py` | ¿Ve el ultrasonido de baja frecuencia (0.25-1 MHz) las fracturas internas que la ecografía no ve? Transmisión a través de la pierna y axial por la cortical, en cuerpo normal y obeso (`--procesos N` para paralelizar; ~30 min) |
 
 ### Resultado principal: ¿qué atraviesa un antebrazo de ~47 mm?
 
@@ -143,6 +151,35 @@ fractura con su edema y hematoma cambia el campo una mediana de 1.5 dB a
 
 ![Penetración en todo el espectro](docs/img/04_penetracion.png)
 
+### Fracturas internas: ¿las ven las frecuencias bajas?
+
+![Detección de fracturas internas](docs/img/11_resumen.png)
+
+`11_fracturas_internas_baja_frecuencia.py` compara la ecografía (3 MHz) con
+dos técnicas de ultrasonido de baja frecuencia (0.25, 0.5 y 1 MHz): la
+transmisión a través de la pierna (TT) y la transmisión axial a lo largo de la
+cortical (AT, la de la ultrasonometría ósea). Para no confundir la fractura
+con diferencias anatómicas, el índice D resta al cambio que produce la
+fractura la diferencia entre dos piernas sanas (D ≥ 6 dB = detectable).
+
+| Lesión | Ecografía 3 MHz | Baja frecuencia |
+|---|---|---|
+| Fractura desplazada 1 mm (control) | sí (D ≈ +13 dB) | sí en AT (+8 a +19 dB) |
+| Grieta intracortical o de la cortical lejana | no | no (D entre −3 y −21 dB) |
+| Fractura por estrés con reacción endóstica | no | **sí en TT** (+7 a +9 dB): la señal llega ~0.45 µs antes |
+| Contusión ósea (edema trabecular) | no | dudoso en TT (+2 a +5 dB) |
+
+Conclusión: ninguna técnica distingue la **grieta** interna en sí, porque
+mide 0.1-0.3 mm, mucho menos que la longitud de onda (6 mm a 0.25 MHz), y
+dispersa casi nada. Lo que la baja frecuencia sí ve es la **reacción del
+hueso**: el engrosamiento endóstico de una fractura por estrés cambia el
+tiempo de vuelo a través de todo el hueso. En la práctica las diferencias de
+grosor entre personas también cambian ese tiempo, así que haría falta
+comparar con la pierna contralateral o barrer a lo largo del hueso. En un
+cuerpo obeso la onda guiada por la cortical (AT) deja de separarse de la
+onda directa a baja frecuencia. Límites: corte 2D (la tibia real es un tubo),
+hueso isótropo y sin porosidad, simulación sin ruido.
+
 ### Impedancia eléctrica (baja frecuencia)
 
 A 50 kHz la corriente atraviesa la pierna sin problema, pero su resolución es
@@ -172,7 +209,7 @@ tests/          validación física (pytest)
 
 ## Validación
 
-`pytest` (61 tests, ~35 s) compara cada solver con soluciones analíticas:
+`pytest` (138 tests, ~1 min con la CPU libre) compara cada solver con soluciones analíticas y comprueba los fantomas y los datasets:
 
 - **Ultrasonido**: velocidad de las ondas P y S (< 1 %), coeficiente de
   reflexión en una interfaz (medido 0.539 frente a 0.538 teórico),
