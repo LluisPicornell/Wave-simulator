@@ -17,6 +17,8 @@ AVISO SOBRE LA PRECISIÓN. Estas tablas son las menos precisas del paquete:
     infrarrojo medio y lejano los valores son de orden de magnitud (±50 %).
   - Lípido en el infrarrojo medio: aproximación grosera (0.5 × agua).
   - Parámetros de scattering (a, b) y composiciones: representativos.
+  - Fascia y periostio: estimación como dermis sin melanina (colágeno denso,
+    poca sangre), con el scattering de la piel.
 Sirven para estimar cuánto penetra la luz (orden de magnitud), no para
 dosimetría óptica. Sustitúyelos por datos medidos si necesitas precisión.
 """
@@ -118,6 +120,8 @@ OPTICAL: dict[str, OpticalComposition] = {
     "marrow": OpticalComposition(blood=0.03, so2=0.7, water=0.15, fat=0.8, scat_a=18.4, scat_b=0.672),
     "hematoma": OpticalComposition(blood=1.0, so2=0.3, water=0.55, scat_a=22.0, scat_b=0.66, baseline=False),
     "edema": OpticalComposition(blood=0.05, so2=0.7, water=0.45, fat=0.5, scat_a=16.0, scat_b=0.7),
+    "fascia": OpticalComposition(blood=0.01, so2=0.7, water=0.65, fat=0.02, scat_a=46.0, scat_b=1.421),
+    "periosteum": OpticalComposition(blood=0.03, so2=0.7, water=0.65, fat=0.02, scat_a=46.0, scat_b=1.421),
 }
 
 

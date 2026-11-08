@@ -8,6 +8,9 @@ from .limb import (
     random_fracture, random_ring_fracture, random_limb_spec,
     BodyType, BODY_TYPES, with_body_type, random_body_type,
 )
+from .realism import (
+    RealismSpec, REALISM_PRESETS, CorticalPorosity, TrabecularNetwork, FractalRoughness, SoftTissueStructure,
+)
 
 __all__ = [
     "Phantom", "TISSUE_INDEX", "Fracture", "LimbSpec", "PRESETS", "longitudinal_limb",
@@ -15,4 +18,6 @@ __all__ = [
     "FRACTURE_KINDS", "CORTICAL_FRACTURE_KINDS", "INTERNAL_FRACTURE_KINDS", "RING_FRACTURE_KINDS",
     "random_fracture", "random_ring_fracture", "random_limb_spec",
     "BodyType", "BODY_TYPES", "with_body_type", "random_body_type",
+    "RealismSpec", "REALISM_PRESETS", "CorticalPorosity", "TrabecularNetwork", "FractalRoughness",
+    "SoftTissueStructure",
 ]
