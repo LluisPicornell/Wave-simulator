@@ -12,7 +12,8 @@ Las anatomías se aleatorizan: un tipo de cuerpo (delgado, normal,
 sobrepeso, obeso, musculoso, anciano osteoporótico; ver
 ``wavesim.phantoms.BODY_TYPES``) con variación continua, más ±10 % en cada
 grosor y la inclinación del hueso. La rugosidad cambia de realización con la
-semilla, pero no de parámetros. La mitad de las muestras (por defecto)
+semilla, pero no de parámetros. Por defecto los fantomas usan el modo realista (hueso poroso, trabéculas,
+fascias y periostio; ver ``wavesim.phantoms.realism``). La mitad de las muestras (por defecto)
 tiene una fractura aleatoria, que puede ser también interna (intracortical,
 de la cortical lejana, contusión ósea o por estrés).
 """
@@ -30,7 +31,8 @@ import numpy as np
 from ..analysis import resample_mask, resample_mask_apparent_depth
 from ..em import xray
 from ..mri import mri_scan
-from ..phantoms import FRACTURE_KINDS, BodyType, LimbSpec, longitudinal_limb, random_fracture, random_limb_spec
+from ..phantoms import (FRACTURE_KINDS, BodyType, LimbSpec, RealismSpec, longitudinal_limb, random_fracture,
+                        random_limb_spec)
 from ..phantoms.phantom import Phantom
 from ..ultrasound import simulate_bmode
 
@@ -113,11 +115,15 @@ def auto_depth(spec: LimbSpec, minimum: float = 22e-3, below_cortex: float = 3e-
 
 def make_phantom(rng: np.random.Generator, preset: str, fracture: bool, dx: float, width: float,
                  depth: float | str | None, body: BodyChoice = None,
-                 fracture_kinds: Sequence[str] | None = None) -> Phantom:
+                 fracture_kinds: Sequence[str] | None = None,
+                 realism: str | RealismSpec | None = "realista") -> Phantom:
     """Fantoma longitudinal aleatorio, con un tipo de cuerpo y (si se pide) una fractura.
 
     ``depth``: profundidad de la imagen (m), ``"auto"`` (ver ``auto_depth``) o
     ``None`` (la extremidad completa).
+    ``realism``: microestructura del fantoma (``"realista"`` por defecto: hueso
+    poroso, trabéculas, fascias...; ``None`` o ``"basico"`` para el fantoma de
+    capas lisas). La calidad ósea sale del tipo de cuerpo sorteado.
 
     Si se pide fractura, se garantiza que la grieta cae dentro de la imagen:
     las fracturas de la cortical lejana se descartan cuando ``depth`` no
@@ -131,13 +137,15 @@ def make_phantom(rng: np.random.Generator, preset: str, fracture: bool, dx: floa
     if depth == "auto":
         depth = auto_depth(spec)
     if not fracture:
-        return longitudinal_limb(spec, None, width=width, depth=depth, dx=dx, seed=int(rng.integers(0, 2**31 - 1)))
+        return longitudinal_limb(spec, None, width=width, depth=depth, dx=dx, seed=int(rng.integers(0, 2**31 - 1)),
+                                 realism=realism)
     kinds = _kinds_in_view(spec, depth, fracture_kinds or FRACTURE_KINDS)
     if not kinds:
         raise ValueError(f"Ningún tipo de {fracture_kinds} cabe en una imagen de {depth * 1e3:.0f} mm de profundidad")
     for _ in range(_MAX_FRACTURE_TRIES):
         fr = replace(random_fracture(rng, kinds=kinds), min_gap_cells=1.0)
-        ph = longitudinal_limb(spec, fr, width=width, depth=depth, dx=dx, seed=int(rng.integers(0, 2**31 - 1)))
+        ph = longitudinal_limb(spec, fr, width=width, depth=depth, dx=dx, seed=int(rng.integers(0, 2**31 - 1)),
+                               realism=realism)
         if ph.has_fracture:
             return ph
     raise ValueError(f"No se consiguió una fractura visible en {_MAX_FRACTURE_TRIES} intentos "
@@ -146,7 +154,8 @@ def make_phantom(rng: np.random.Generator, preset: str, fracture: bool, dx: floa
 
 def generate_sample(rng: np.random.Generator, modality: str, preset: str = "tibia", fracture: bool | None = None,
                     fracture_prob: float = 0.5, width: float = 24e-3, depth: float | str | None = "auto",
-                    body: BodyChoice = None, fracture_kinds: Sequence[str] | None = None, **kw) -> dict:
+                    body: BodyChoice = None, fracture_kinds: Sequence[str] | None = None,
+                    realism: str | RealismSpec | None = "realista", **kw) -> dict:
     """Genera una muestra (imagen + etiqueta + máscara) de la modalidad indicada.
 
     ``depth``: profundidad de la imagen (m), ``"auto"`` (hasta la mitad de la
@@ -161,7 +170,7 @@ def generate_sample(rng: np.random.Generator, modality: str, preset: str = "tibi
         raise ValueError(f"Modalidad '{modality}' no soportada; usa una de {MODALITIES}")
     if fracture is None:
         fracture = bool(rng.random() < fracture_prob)
-    ph = make_phantom(rng, preset, fracture, _DX[modality], width, depth, body, fracture_kinds)
+    ph = make_phantom(rng, preset, fracture, _DX[modality], width, depth, body, fracture_kinds, realism)
     image, mask, x, z = _RUNNERS[modality](ph, rng, **kw)
     mask = mask.astype(np.uint8)
     return {"image": image, "mask": mask, "label": int(ph.has_fracture), "x_mm": x * 1e3, "z_mm": z * 1e3,
@@ -170,7 +179,8 @@ def generate_sample(rng: np.random.Generator, modality: str, preset: str = "tibi
 
 def generate_dataset(out_dir: str | Path, n: int, modality: str = "ct", preset: str = "tibia", seed: int = 0,
                      fracture_prob: float = 0.5, verbose: bool = True, body: BodyChoice = None,
-                     fracture_kinds: Sequence[str] | None = None, **kw) -> Path:
+                     fracture_kinds: Sequence[str] | None = None, realism: str | RealismSpec | None = "realista",
+                     **kw) -> Path:
     """Escribe ``n`` muestras en ``out_dir`` y un índice ``index.json`` (ver ``generate_sample``)."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -179,7 +189,7 @@ def generate_dataset(out_dir: str | Path, n: int, modality: str = "ct", preset: 
     t0 = time.time()
     for k in range(n):
         s = generate_sample(rng, modality, preset, fracture_prob=fracture_prob, body=body,
-                            fracture_kinds=fracture_kinds, **kw)
+                            fracture_kinds=fracture_kinds, realism=realism, **kw)
         name = f"{modality}_{k:05d}.npz"
         np.savez_compressed(out / name, image=s["image"], mask=s["mask"], label=s["label"], x_mm=s["x_mm"],
                             z_mm=s["z_mm"])
@@ -193,7 +203,8 @@ def generate_dataset(out_dir: str | Path, n: int, modality: str = "ct", preset: 
     body_desc = asdict(body) if isinstance(body, BodyType) else (body if body is None or isinstance(body, str)
                                                                    else list(body))
     with open(out / "index.json", "w", encoding="utf-8") as fh:
-        json.dump({"modality": modality, "preset": preset, "seed": seed, "body": body_desc,
+        realism_desc = realism if realism is None or isinstance(realism, str) else asdict(realism)
+        json.dump({"modality": modality, "preset": preset, "seed": seed, "body": body_desc, "realism": realism_desc,
                    "fracture_kinds": list(fracture_kinds) if fracture_kinds else None, "samples": index},
                   fh, indent=1, ensure_ascii=False, default=float)
     return out

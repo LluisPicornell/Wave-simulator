@@ -1,7 +1,6 @@
 """Validación del solver cuasi-estático (corrientes en tejido a baja frecuencia) y de la EIT."""
 
 import numpy as np
-import pytest
 
 from wavesim.core.grid import Grid2D
 from wavesim.em import (

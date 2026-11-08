@@ -59,3 +59,12 @@ def test_ultrasound_mask_uses_apparent_depth():
     z_app = z_img[np.nonzero(out[:, 0])[0]].mean()
     expected = 1e-3 + 1540.0 / 1500.0 * (g.z[j_true] - 1e-3)
     assert z_app == pytest.approx(expected, abs=0.05e-3)
+
+
+def test_datasets_use_realistic_phantoms_by_default(tmp_path):
+    out = generate_dataset(tmp_path, 2, "mri", seed=5, verbose=False)
+    idx = json.loads((out / "index.json").read_text())
+    assert idx["realism"] == "realista"
+    assert idx["samples"][0]["meta"]["microstructure"]["cortical_porosity"] > 0
+    basic = generate_dataset(tmp_path / "b", 1, "mri", seed=5, verbose=False, realism=None)
+    assert json.loads((basic / "index.json").read_text())["realism"] is None
