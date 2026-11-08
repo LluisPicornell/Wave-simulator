@@ -68,8 +68,9 @@ class DiffusionResult:
 
 
 def optical_maps(phantom: Phantom, wavelength_nm: float) -> tuple[np.ndarray, np.ndarray]:
-    mua = phantom.property_map(lambda k: float(optical.mu_a(k, wavelength_nm)))
-    mus = phantom.property_map(lambda k: float(optical.mu_s_reduced(k, wavelength_nm)))
+    """``(mu_a, mu_s')`` por celda; en las celdas porosas, mezcla lineal por volumen."""
+    mua = phantom.property_map(lambda k: float(optical.mu_a(k, wavelength_nm)), physics="optical")
+    mus = phantom.property_map(lambda k: float(optical.mu_s_reduced(k, wavelength_nm)), physics="optical")
     return mua, mus
 
 
@@ -200,10 +201,6 @@ def solve_diffusion(phantom: Phantom, wavelength_nm: float, source: str | tuple[
 def ballistic_transmission(phantom: Phantom, wavelength_nm: float, x: float = 0.0) -> float:
     """Fracción de fotones que cruzan la columna ``x`` de arriba abajo sin dispersarse."""
     _, i = phantom.grid.index_of(x, 0.0)
-    keys = [k for k in phantom.present_tissues() if k not in NON_TISSUE]
-    mut = {k: float(optical.mu_total(k, wavelength_nm)) for k in keys}
-    col = phantom.labels[:, i]
-    total = 0.0
-    for k in keys:
-        total += mut[k] * np.count_nonzero(col == TISSUE_INDEX[k]) * phantom.grid.dx
-    return float(np.exp(-total))
+    mut = {k: 0.0 if k in NON_TISSUE else float(optical.mu_total(k, wavelength_nm)) for k in phantom.property_tissues()}
+    col = phantom.property_map(lambda k: mut[k], physics="optical")[:, i]
+    return float(np.exp(-np.sum(col) * phantom.grid.dx))

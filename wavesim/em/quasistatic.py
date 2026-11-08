@@ -79,7 +79,9 @@ class QuasiStaticSolver:
         self.f = float(f)
         self.tissue = tissue_mask(phantom)
         if admittivity_map is None:
-            admittivity_map = phantom.property_map(lambda k: admittivity(k, self.f), dtype=complex)
+            # Maxwell Garnett en las celdas porosas (es homogéneo en la admitividad, que es ∝ eps)
+            admittivity_map = phantom.property_map(lambda k: admittivity(k, self.f), dtype=complex,
+                                                   physics="dielectric")
         self.y = np.where(self.tissue, admittivity_map, 0.0)
         tis = self.tissue
         # Media armónica en las caras tejido-tejido; cero si algún lado es exterior (flujo nulo)

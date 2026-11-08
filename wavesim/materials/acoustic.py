@@ -15,6 +15,16 @@ Atenuación: ``alpha(f) = alpha0 * f[MHz]**y`` en dB/cm. Para el hueso se
 supone el mismo factor de calidad Q para ondas P y S, lo que da
 ``alpha_s = alpha_p * c_p / c_s``.
 
+Fascia y periostio (tejido conectivo denso, colágeno tipo I) son
+**estimaciones**: no hay medidas directas a 37 °C de su velocidad y su
+atenuación. Se toma la densidad del tejido conectivo de ICRU-44 (1120 kg/m³)
+y una velocidad intermedia entre la piel (1615 m/s) y el tendón medido
+perpendicular a las fibras (~1650-1700 m/s; a lo largo de ellas, ~1750 m/s,
+Duck 1990), que es como la cruza el haz de una ecografía. La atenuación
+(2.5 dB/(cm·MHz)) se pone entre la de la piel y la del tendón. Lo que las hace
+ecogénicas en la imagen es el salto de impedancia con la grasa
+(R ≈ 0.17) y su textura fibrosa (``SCATTER_STRENGTH``).
+
 Los tejidos blandos tienen módulos de cizalla de kPa (ondas S de pocos m/s que
 se atenúan en micras a frecuencias de MHz), así que se tratan como fluidos
 (``c_s = 0``).
@@ -66,6 +76,10 @@ ACOUSTIC: dict[str, AcousticProps] = {
     "hematoma": AcousticProps(1060.0, 1580.0, 0.0, 0.3, 0.0, 1.2),
     # médula con más agua por el edema
     "edema": AcousticProps(1010.0, 1500.0, 0.0, 0.5, 0.0, 1.0),
+    # tejido conectivo denso (estimación, ver arriba)
+    "fascia": AcousticProps(1120.0, 1650.0, 0.0, 2.5, 0.0, 1.0),
+    # capa fibrosa del periostio: como la fascia (estimación)
+    "periosteum": AcousticProps(1120.0, 1650.0, 0.0, 2.5, 0.0, 1.0),
 }
 
 

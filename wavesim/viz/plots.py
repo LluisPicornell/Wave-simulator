@@ -19,19 +19,24 @@ _KEYS = tissue_keys()
 TISSUE_CMAP = ListedColormap([TISSUES[k].color for k in _KEYS])
 
 
-def plot_phantom(phantom, ax=None, title: str | None = None, show_fracture: bool = True, legend: bool = True):
-    """Mapa de tejidos con leyenda y, opcionalmente, el contorno de la fractura."""
+def plot_phantom(phantom, ax=None, title: str | None = None, show_fracture: bool = True, legend: bool = True,
+                 show_pores: bool = True):
+    """Mapa de tejidos con leyenda y, opcionalmente, el contorno de la fractura.
+
+    ``show_pores``: los poros y espacios trabeculares resueltos (porosidad
+    ≥ 0.5) se pintan con el color de su relleno.
+    """
     if ax is None:
         _, ax = plt.subplots(figsize=(7, 6))
     ext = phantom.grid.extent_mm()
-    ax.imshow(phantom.labels, cmap=TISSUE_CMAP, vmin=-0.5, vmax=len(_KEYS) - 0.5, extent=ext,
-              interpolation="nearest")
+    labels = phantom.display_labels() if show_pores else phantom.labels
+    ax.imshow(labels, cmap=TISSUE_CMAP, vmin=-0.5, vmax=len(_KEYS) - 0.5, extent=ext, interpolation="nearest")
     if show_fracture and phantom.has_fracture:
         g = phantom.grid
         ax.contour(g.x * 1e3, g.z * 1e3, phantom.fracture_mask.astype(float), levels=[0.5], colors="red",
                    linewidths=0.8)
     if legend:
-        present = phantom.present_tissues()
+        present = [k for k in _KEYS if np.any(labels == _KEYS.index(k))]
         handles = [Patch(facecolor=TISSUES[k].color, edgecolor="k", lw=0.3, label=TISSUES[k].name) for k in present]
         ax.legend(handles=handles, loc="center left", bbox_to_anchor=(1.01, 0.5), fontsize=8, frameon=False)
     ax.set_xlabel("x [mm]")

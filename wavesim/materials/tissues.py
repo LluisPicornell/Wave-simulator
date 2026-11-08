@@ -6,7 +6,9 @@ color para las figuras. Sus propiedades físicas viven en un módulo por física
 propias fuentes bibliográficas. ``tests/test_materials.py`` comprueba que todas
 las tablas cubren todos los tejidos de este registro.
 
-Para añadir un tejido nuevo: añádelo aquí y en cada tabla de propiedades.
+Para añadir un tejido nuevo: añádelo aquí (al final, para no cambiar los
+índices de los anteriores en los mapas de etiquetas) y en cada tabla de
+propiedades.
 """
 
 from __future__ import annotations
@@ -35,6 +37,11 @@ TISSUES: dict[str, TissueInfo] = {
         TissueInfo("marrow", "médula ósea amarilla", "#e9c46a"),
         TissueInfo("hematoma", "hematoma (sangre en la fractura)", "#5e2a84"),
         TissueInfo("edema", "médula con edema óseo", "#2a9d8f"),
+        # Tejido conectivo denso (colágeno tipo I): fascia superficial y profunda,
+        # septos de la grasa y perimisio del músculo. Sólo aparece en el modo realista.
+        TissueInfo("fascia", "fascia / septo conectivo", "#b0bec5"),
+        # Capa fibrosa que envuelve la cortical (0.1-0.3 mm en el adulto).
+        TissueInfo("periosteum", "periostio", "#a1887f"),
     ]
 }
 
