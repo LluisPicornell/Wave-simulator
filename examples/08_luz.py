@@ -22,9 +22,9 @@ for ax, lam in zip(axs.ravel(), wavelengths):
     ax.imshow(p.labels, cmap="gray", extent=p.grid.extent_mm(), alpha=0.4)
     im = ax.imshow(np.log10(np.maximum(r.fluence, r.floor)), cmap="inferno", vmin=-14, vmax=1, extent=p.grid.extent_mm(),
                    alpha=0.85)
-    ax.set_title(f"{lam} nm — transmitido {r.transmission_text()}\n"
+    ax.set_title(f"{lam} nm — exitancia inferior {r.transmission_text()}\n"
                  f"(balístico: {optics.ballistic_transmission(p, lam):.0e})")
     plt.colorbar(im, ax=ax, fraction=0.046, label="log10 fluencia relativa")
-    print(f"{lam} nm: transmisión difusa {r.transmission_text()}, {r.iterations} iteraciones CG")
+    print(f"{lam} nm: exitancia difusa por el borde inferior {r.transmission_text()}, {r.iterations} iteraciones CG")
 fig.tight_layout()
 print("Guardado:", save(fig, OUT / "08_luz.png", dpi=90))

@@ -35,6 +35,7 @@ C0 = dielectric.C0
 HZ_PER_KEV = 1e3 * EV / H_PLANCK  # 2.418e17 Hz
 
 DIELECTRIC_MAX_F = 1e12  # hasta 1 THz se usa la permitividad (Gabriel + agua)
+COHERENT_MAX_DB = 100.0  # por encima la T coherente se acerca al desbordamiento y la interferencia es nula
 OPTICAL_MIN_NM = 200.0
 
 # mu/rho del agua entre 1 y 10 keV (NIST), para extender los rayos X blandos
@@ -148,13 +149,50 @@ def column_layers(phantom: Phantom, x: float = 0.0, skip=("water", "air")) -> li
     return layers
 
 
+def _coherent_transmission(layers: list[tuple[str, float]], f: float, outer: str) -> float:
+    """Transmisión de potencia (0-1) por matriz de transferencia de onda plana, incidencia normal.
+
+    Cada capa aporta la matriz ``[[cos kd, j eta sin kd], [j sin kd / eta, cos kd]]`` con
+    ``k = w sqrt(mu0 eps0 eps)`` y ``eta = sqrt(mu0 / (eps0 eps))`` complejas (convención
+    ``e^{+jwt}`` de ``dielectric``). Las reflexiones se suman con su fase, de modo que las
+    capas más finas que λ interfieren en vez de acumular pérdidas independientes.
+    """
+    m = np.eye(2, dtype=complex)
+    for key, th in layers:
+        eps = complex(dielectric.complex_permittivity(key, f))
+        k = 2.0 * np.pi * f / C0 * np.sqrt(eps)
+        eta = complex(dielectric.intrinsic_impedance(key, f))
+        c, s = np.cos(k * th), np.sin(k * th)
+        m = m @ np.array([[c, 1j * eta * s], [1j * s / eta, c]])
+    eta_out = complex(dielectric.intrinsic_impedance(outer, f))
+    t = 2.0 / (m[0, 0] + m[0, 1] / eta_out + m[1, 0] * eta_out + m[1, 1])
+    return float(abs(t) ** 2)
+
+
 def through_transmission_db(layers: list[tuple[str, float]], f: float, modality: str = "em",
                             include_interfaces: bool = True, outer: str = "water") -> dict:
     """Pérdida (dB) de una onda que cruza las capas a incidencia normal.
 
     ``modality``: "em" (cualquier frecuencia electromagnética) o "ultrasound".
-    Las pérdidas por reflexión en las interfaces se incluyen donde el modelo
-    de onda plana es válido (ultrasonido y EM entre 10 MHz y 1 THz).
+    ``outer`` es el medio semi-infinito a ambos lados de la pila; el resultado de
+    las interfaces (y por tanto ``total_db`` y ``reflection_db``) depende de él.
+
+    * ``absorption_db``: suma de Beer-Lambert ``10 log10(e) mu d`` de cada capa.
+    * ``total_db``: ``-10 log10 T``. En EM entre 10 MHz y 1 THz, ``T`` sale de la
+      matriz de transferencia *coherente*: con capas más finas que λ (p. ej. a
+      64 MHz) sumar reflexiones por separado da 14.2 dB en el antebrazo, mientras
+      que la interferencia real da 3.1 dB.
+    * ``reflection_db = total_db - absorption_db``: es el efecto neto de las
+      interfaces y puede ser **negativo** (interferencia constructiva que
+      compensa parte de la absorción), así que no es una pérdida estrictamente.
+
+    Ultrasonido: se mantiene la suma incoherente de las pérdidas por interfaz, porque
+    un pulso de banda ancha (±20 %) promedia las resonancias de las capas y la suma
+    incoherente coincide con la matriz de transferencia promediada en la banda. Fuera
+    de 10 MHz-1 THz (cuasi-estático, óptica, rayos X) no se calculan reflexiones de
+    onda plana: ``reflection_db`` vale 0 (o la suma incoherente en ultrasonido). Si la
+    absorción supera ``COHERENT_MAX_DB`` (ondas mm, THz) la onda reflejada no vuelve a
+    cruzar la pila, no hay interferencia y se suman las interfaces por separado.
     """
     absorb = 0.0
     for k, th in layers:
@@ -163,25 +201,30 @@ def through_transmission_db(layers: list[tuple[str, float]], f: float, modality:
         else:
             mu = attenuation(k, f)["mu"]
         absorb += 10 * np.log10(np.e) * mu * th
+    if not (include_interfaces and layers):
+        return {"absorption_db": absorb, "reflection_db": 0.0, "total_db": absorb}
+    wave = modality != "ultrasound" and 1e7 <= f <= DIELECTRIC_MAX_F
+    if wave and absorb < COHERENT_MAX_DB:
+        total = -10 * np.log10(_coherent_transmission(layers, f, outer))
+        return {"absorption_db": absorb, "reflection_db": total - absorb, "total_db": total}
+    # Suma incoherente de la pérdida de cada interfaz. En EM sólo se llega aquí si la pila
+    # absorbe tanto que la onda reflejada no vuelve a cruzarla (no hay interferencia) o
+    # fuera del régimen de onda plana (cuasi-estático, óptica, rayos X: sin reflexión).
     refl = 0.0
-    if include_interfaces and layers:
-        seq = [outer] + [k for k, _ in layers] + [outer]
-        for a, b in zip(seq[:-1], seq[1:]):
-            if a == b:
-                continue
-            if modality == "ultrasound":
-                za, zb = ACOUSTIC[a].impedance, ACOUSTIC[b].impedance
-                t = 4 * za * zb / (za + zb) ** 2
-            elif f < 1e7:
-                t = 1.0  # cuasi-estático: λ ≫ cuerpo, la reflexión de onda plana no tiene sentido
-            elif f <= DIELECTRIC_MAX_F:
-                ea = dielectric.intrinsic_impedance(a, f)
-                eb = dielectric.intrinsic_impedance(b, f)
-                gamma = (eb - ea) / (eb + ea)
-                t = 1 - abs(gamma) ** 2
-            else:
-                t = 1.0
-            refl += -10 * np.log10(max(t, 1e-30))
+    seq = [outer] + [k for k, _ in layers] + [outer]
+    for a, b in zip(seq[:-1], seq[1:]):
+        if a == b:
+            continue
+        if modality == "ultrasound":
+            za, zb = ACOUSTIC[a].impedance, ACOUSTIC[b].impedance
+            t = 4 * za * zb / (za + zb) ** 2
+        elif wave:
+            ea = dielectric.intrinsic_impedance(a, f)
+            eb = dielectric.intrinsic_impedance(b, f)
+            t = 1 - abs((eb - ea) / (eb + ea)) ** 2
+        else:
+            t = 1.0
+        refl += -10 * np.log10(max(t, 1e-30))
     return {"absorption_db": absorb, "reflection_db": refl, "total_db": absorb + refl}
 
 

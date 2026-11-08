@@ -46,7 +46,14 @@ class Source:
 
     ``signals`` tiene forma ``(n_canales, nt)``; ``channel[k]`` indica qué
     canal alimenta a la celda ``(j[k], i[k])``. ``kind``: "pressure" (presión
-    en Pa), "force_x" o "force_z" (velocidad en m/s inyectada como fuerza).
+    en Pa), "force_x" o "force_z" (fuerza puntual aditiva sobre la velocidad).
+
+    Normalización de las fuentes de fuerza: el incremento se escala con la
+    velocidad *P* local (``2 cp dt / dx``), de modo que ``signals`` es la
+    velocidad de partícula (m/s) de la onda P emitida en un fluido. En un sólido
+    la misma fuerza excita también ondas S, y su amplitud sale ~``cp/cs`` veces
+    mayor que ``signals`` (la normalización no usa ``cs``): ``signals`` no es la
+    velocidad de partícula de la onda S. Calibrar a mano si se necesita ese valor.
     """
 
     j: np.ndarray
@@ -275,7 +282,9 @@ class ElasticSolver:
     def _apply_force_sources(self, n: int) -> None:
         for s in self.sources:
             if s.kind in ("force_x", "force_z"):
-                # Fuente de fuerza aditiva: emite ~``vals`` m/s de velocidad de partícula
+                # Fuente de fuerza aditiva. La escala usa cp: emite ~``vals`` m/s de velocidad
+                # de partícula sólo para la onda P en un fluido; la onda S en un sólido sale
+                # ~cp/cs veces mayor (la física no se corrige, sólo se documenta).
                 target = self.vx if s.kind == "force_x" else self.vz
                 inc = s.signals[s.channel, n] * (2.0 * self.cp_local[s.j, s.i] * self.dt * self.inv_dx)
                 np.add.at(target, (s.j, s.i), inc)

@@ -106,3 +106,44 @@ def test_through_limb_losses_are_finite_and_ordered():
     layers = spectrum.column_layers(p)
     loss = {f: spectrum.through_transmission_db(layers, f)["total_db"] for f in (2.45e9, 1e12, 60 * spectrum.HZ_PER_KEV)}
     assert loss[60 * spectrum.HZ_PER_KEV] < loss[2.45e9] < loss[1e12]
+
+
+def test_coherent_transmission_matches_transfer_matrix_for_thin_layers():
+    # Antebrazo a 64 MHz: las capas son mucho más finas que λ, así que las reflexiones
+    # interfieren. La suma incoherente daba 14.2 dB; la matriz de transferencia da ~3.1 dB.
+    layers = spectrum.column_layers(longitudinal_limb("antebrazo", dx=0.1e-3, width=10e-3))
+    r = spectrum.through_transmission_db(layers, 64e6)
+    assert r["total_db"] == pytest.approx(3.1, abs=0.3)
+    assert r["total_db"] == pytest.approx(r["absorption_db"] + r["reflection_db"])
+    # una capa homogénea sin interfaces con el exterior sólo tiene absorción
+    one = [("water", 5e-3)]
+    r1 = spectrum.through_transmission_db(one, 1e9, outer="water")
+    assert r1["reflection_db"] == pytest.approx(0.0, abs=1e-6)
+    assert r1["total_db"] == pytest.approx(r1["absorption_db"], rel=1e-6)
+
+
+def test_coherent_transmission_depends_on_outer_medium():
+    layers = [("muscle", 20e-3)]
+    in_water = spectrum.through_transmission_db(layers, 915e6, outer="water")["total_db"]
+    in_air = spectrum.through_transmission_db(layers, 915e6, outer="air")["total_db"]
+    assert in_air > in_water + 1.0
+
+
+def test_light_transmission_converges_with_cell_size():
+    # Losa de músculo de 10 mm en aire a 800 nm: con el contorno extrapolado la
+    # exitancia no depende (más de un 25 %) de dx.
+    out = []
+    for dx in (0.2e-3, 0.05e-3):
+        g = Grid2D.from_size(2e-3, 14e-3, dx, x0=-1e-3)
+        lab = np.full(g.shape, TISSUE_INDEX["air"], np.int16)
+        lab[(g.z >= 2e-3) & (g.z < 12e-3), :] = TISSUE_INDEX["muscle"]
+        out.append(optics.solve_diffusion(Phantom(g, lab), 800.0, tol=1e-12).transmission)
+    assert abs(out[1] / out[0] - 1.0) < 0.25
+
+
+def test_point_source_outside_tissue_raises():
+    g = Grid2D.from_size(4e-3, 6e-3, 0.2e-3, x0=-2e-3)
+    lab = np.full(g.shape, TISSUE_INDEX["air"], np.int16)
+    lab[(g.z >= 2e-3), :] = TISSUE_INDEX["muscle"]
+    with pytest.raises(ValueError, match="fuera del tejido"):
+        optics.solve_diffusion(Phantom(g, lab), 800.0, source=(0.0, 0.5e-3))

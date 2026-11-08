@@ -7,9 +7,13 @@ difusión estacionaria:
 
     -div(D grad(Phi)) + mu_a Phi = S,     D = 1 / (3 (mu_a + mu_s'))
 
-con diferencias finitas y gradiente conjugado precondicionado. Fuera del
-tejido (agua o aire de fondo) ``Phi = 0`` (aproximación de contorno de flujo
-nulo extrapolado a una celda).
+con diferencias finitas y gradiente conjugado precondicionado. En la frontera
+con el exterior (agua o aire de fondo) se impone el contorno de flujo nulo
+*extrapolado* (Robin): ``Phi = 0`` a una distancia ``z_b = 2 A D`` fuera de la
+superficie, donde ``A`` sale del salto de índice de refracción tejido/exterior.
+Imponer ``Phi = 0`` en la celda vecina, como se hacía antes, hacía depender la
+transmisión del tamaño de celda ``dx``; con ``z_b`` físico el resultado converge.
+La transmisión se da como flujo saliente (exitancia) por la cara inferior.
 
 Para imagen nítida sólo valen los fotones balísticos (no dispersados), que
 se atenúan con ``mu_a + mu_s``: a través de una extremidad su número es
@@ -28,6 +32,9 @@ from ..phantoms.phantom import TISSUE_INDEX, Phantom
 
 NON_TISSUE = ("water", "air")
 
+N_TISSUE = 1.4  # índice de refracción típico de un tejido blando en el visible / NIR
+N_OUTER = {"air": 1.0, "water": 1.33}
+
 
 @dataclass
 class DiffusionResult:
@@ -35,24 +42,29 @@ class DiffusionResult:
     fluence: np.ndarray  # W/m² por W/m² de irradiancia incidente
     mu_a: np.ndarray
     mu_s_reduced: np.ndarray
-    transmitted_profile: np.ndarray  # fluencia en la última celda de tejido de cada columna
+    transmitted_profile: np.ndarray  # exitancia (flujo saliente) por la cara inferior de cada columna
     iterations: int
     residual: float
     floor: float  # por debajo de este valor la fluencia no es numéricamente fiable
+    transmission_floor: float  # lo mismo para la exitancia transmitida
 
     @property
     def transmission(self) -> float:
-        """Fluencia media transmitida al lado opuesto (relativa a la irradiancia incidente)."""
+        """Exitancia media por el borde inferior (relativa a la irradiancia incidente).
+
+        Es el flujo neto que sale del tejido, ``D dPhi/dz`` en la superficie, y no la
+        fluencia de la última celda: ésta depende de ``dx`` y sobrestima lo que sale.
+        """
         p = self.transmitted_profile
         return float(np.mean(p[np.isfinite(p)])) if np.isfinite(p).any() else 0.0
 
     @property
     def transmission_reliable(self) -> bool:
         """False si la luz transmitida es tan débil que queda bajo la precisión del solver."""
-        return self.transmission > self.floor
+        return self.transmission > self.transmission_floor
 
     def transmission_text(self) -> str:
-        return f"{self.transmission:.1e}" if self.transmission_reliable else f"< {self.floor:.0e}"
+        return f"{self.transmission:.1e}" if self.transmission_reliable else f"< {self.transmission_floor:.0e}"
 
 
 def optical_maps(phantom: Phantom, wavelength_nm: float) -> tuple[np.ndarray, np.ndarray]:
@@ -61,7 +73,26 @@ def optical_maps(phantom: Phantom, wavelength_nm: float) -> tuple[np.ndarray, np
     return mua, mus
 
 
-def _face_diffusion(D: np.ndarray, tissue: np.ndarray, axis: int) -> np.ndarray:
+def boundary_parameter(n_outer: float, n_tissue: float = N_TISSUE) -> float:
+    """Parámetro ``A = (1 + R_eff) / (1 - R_eff)`` del contorno extrapolado.
+
+    ``R_eff`` es la reflectividad interna efectiva de la interfaz tejido/exterior,
+    con el ajuste polinómico de Groenhuis et al. (1983) en ``n = n_tejido / n_exterior``.
+    ``A = 1`` si no hay salto de índice.
+    """
+    n = n_tissue / n_outer
+    r_eff = -1.440 / n**2 + 0.710 / n + 0.668 + 0.0636 * n
+    return (1.0 + r_eff) / (1.0 - r_eff)
+
+
+def _outer_index(phantom: Phantom) -> float:
+    """Índice de refracción del medio de fondo: el más abundante entre agua y aire (aire si no hay)."""
+    counts = {k: int(np.count_nonzero(phantom.labels == TISSUE_INDEX[k])) for k in NON_TISSUE}
+    key = max(counts, key=counts.get)
+    return N_OUTER[key] if counts[key] > 0 else N_OUTER["air"]
+
+
+def _face_diffusion(D: np.ndarray, tissue: np.ndarray, axis: int, dx: float, A: float) -> np.ndarray:
     a = D[:, :-1] if axis == 1 else D[:-1, :]
     b = D[:, 1:] if axis == 1 else D[1:, :]
     ta = tissue[:, :-1] if axis == 1 else tissue[:-1, :]
@@ -69,21 +100,28 @@ def _face_diffusion(D: np.ndarray, tissue: np.ndarray, axis: int) -> np.ndarray:
     with np.errstate(divide="ignore", invalid="ignore"):
         hm = 2 * a * b / (a + b)
     face = np.where(ta & tb, hm, 0.0)
-    face = np.where(ta & ~tb, a, face)  # vecino fuera: Phi = 0 en la celda vecina
-    face = np.where(~ta & tb, b, face)
+    # Vecino fuera: Phi = 0 a z_b = 2 A D de la cara. Entre el centro de la celda y ese
+    # punto hay dx/2 + z_b, de modo que la conductancia es D dx / (dx/2 + z_b).
+    face = np.where(ta & ~tb, a * dx / (dx / 2 + 2 * A * a), face)
+    face = np.where(~ta & tb, b * dx / (dx / 2 + 2 * A * b), face)
     return face
 
 
 def solve_diffusion(phantom: Phantom, wavelength_nm: float, source: str | tuple[float, float] = "top",
                     tol: float = 1e-13, max_iter: int = 50_000) -> DiffusionResult:
-    """Fluencia de luz en el fantoma para iluminación desde arriba (``"top"``) o una fibra en ``(x, z)``."""
+    """Fluencia de luz en el fantoma para iluminación desde arriba (``"top"``) o una fibra en ``(x, z)``.
+
+    El exterior (agua o aire) se toma del fondo del fantoma para calcular el
+    contorno extrapolado. Lanza ``ValueError`` si la fibra no está dentro del tejido.
+    """
     g = phantom.grid
     dx2 = g.dx**2
     mua, mus = optical_maps(phantom, wavelength_nm)
     tissue = ~np.isin(phantom.labels, [TISSUE_INDEX[k] for k in NON_TISSUE])
     D = np.where(tissue, 1.0 / (3.0 * (mua + mus + 1e-12)), 0.0)
-    fx = _face_diffusion(D, tissue, 1) / dx2
-    fz = _face_diffusion(D, tissue, 0) / dx2
+    A = boundary_parameter(_outer_index(phantom))
+    fx = _face_diffusion(D, tissue, 1, g.dx, A) / dx2
+    fz = _face_diffusion(D, tissue, 0, g.dx, A) / dx2
     diag = mua.copy()
     diag[:, :-1] += fx
     diag[:, 1:] += fx
@@ -115,6 +153,8 @@ def solve_diffusion(phantom: Phantom, wavelength_nm: float, source: str | tuple[
             b[j, i] = 1.0 / g.dx
     else:
         j, i = g.index_of(*source)
+        if not tissue[j, i]:
+            raise ValueError(f"la fuente puntual {tuple(source)} cae fuera del tejido (en agua o aire)")
         b[j, i] = 1.0 / dx2
 
     # Gradiente conjugado con precondicionador de Jacobi
@@ -132,6 +172,8 @@ def solve_diffusion(phantom: Phantom, wavelength_nm: float, source: str | tuple[
         phi += alpha * p
         r -= alpha * ap
         res = np.linalg.norm(r) / bnorm
+        if not (np.isfinite(alpha) and np.isfinite(res)):
+            raise RuntimeError(f"el gradiente conjugado divergió en la iteración {it} (valor no finito)")
         if res < tol:
             break
         zv = r / diag
@@ -145,8 +187,14 @@ def solve_diffusion(phantom: Phantom, wavelength_nm: float, source: str | tuple[
     phi = np.maximum(phi, 0.0)
     last = g.nz - 1 - np.argmax(tissue[::-1, :], axis=0)
     has = tissue.any(axis=0)
-    prof = np.where(has, phi[last, np.arange(g.nx)], np.nan)
-    return DiffusionResult(wavelength_nm, phi, mua, mus, prof, it, float(res), floor)
+    cols = np.arange(g.nx)
+    # Exitancia = D Phi_c / (dx/2 + z_b): lo mismo que Phi_frontera / (2A) con Phi_frontera
+    # extrapolado linealmente desde el centro de la última celda de tejido.
+    d_last = D[last, cols]
+    gain = d_last / (g.dx / 2 + 2 * A * d_last)
+    prof = np.where(has, phi[last, cols] * gain, np.nan)
+    exit_floor = floor * (float(np.max(gain[has])) if has.any() else 1.0)
+    return DiffusionResult(wavelength_nm, phi, mua, mus, prof, it, float(res), floor, exit_floor)
 
 
 def ballistic_transmission(phantom: Phantom, wavelength_nm: float, x: float = 0.0) -> float:

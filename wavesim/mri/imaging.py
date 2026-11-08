@@ -26,6 +26,8 @@ class MRIImage:
     voxel: float  # tamaño de píxel adquirido (m)
     extent_mm: tuple[float, float, float, float]
     snr: float
+    x: np.ndarray  # coordenada lateral (m) del centro de cada columna
+    z: np.ndarray  # profundidad (m) del centro de cada fila
 
 
 def mri_scan(phantom: Phantom, sequence: Sequence | str = "T2", b0: float = 1.5, voxel: float = 0.4e-3,
@@ -56,4 +58,11 @@ def mri_scan(phantom: Phantom, sequence: Sequence | str = "T2", b0: float = 1.5,
     sigma = ref / snr if snr else 0.0
     if sigma:
         img = img + rng.normal(0, sigma, img.shape) + 1j * rng.normal(0, sigma, img.shape)
-    return MRIImage(np.abs(img), ideal, seq, b0, g.width / mx, g.extent_mm(), snr)
+    # Al recortar el k-space la muestra k de la DFT inversa corresponde a la posición
+    # x0 + k·W/n (no a la de los centros de celda del fantoma, x0 + k·dx): los centros
+    # reales son éstos, y el borde de la imagen está medio píxel más allá.
+    x = g.x0 + np.arange(mx) * g.width / mx
+    z = g.z0 + np.arange(mz) * g.depth / mz
+    hx, hz = 0.5 * g.width / mx, 0.5 * g.depth / mz
+    extent = ((x[0] - hx) * 1e3, (x[-1] + hx) * 1e3, (z[-1] + hz) * 1e3, (z[0] - hz) * 1e3)
+    return MRIImage(np.abs(img), ideal, seq, b0, g.width / mx, extent, snr, x, z)

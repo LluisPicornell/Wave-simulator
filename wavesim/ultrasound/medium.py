@@ -28,6 +28,10 @@ SCATTER_STRENGTH: dict[str, float] = {
     "edema": 0.012,
 }
 
+#: Tamaño de celda de referencia (m) de ``SCATTER_STRENGTH``: la ``dx`` de los
+#: ejemplos a 3 MHz (λ/8 en agua), de modo que sus resultados no cambian.
+DX_REF = 60e-6
+
 
 @dataclass
 class ElasticMedium:
@@ -51,7 +55,8 @@ def elastic_medium(phantom: Phantom, f0: float, n_mechanisms: int = 1, scatterin
     """Construye el medio para el solver elástico a la frecuencia central ``f0``.
 
     ``scattering`` escala ``SCATTER_STRENGTH`` (0 = tejidos perfectamente
-    homogéneos, sin speckle).
+    homogéneos, sin speckle). La amplitud se normaliza por el tamaño de celda
+    (ver ``DX_REF``): el nivel del speckle no depende de la resolución de la malla.
     """
     tau_sigma = att.relaxation_times(f0, n_mechanisms if attenuation else 0)
     band = att.fit_band(f0)
@@ -71,6 +76,12 @@ def elastic_medium(phantom: Phantom, f0: float, n_mechanisms: int = 1, scatterin
     tau_s = phantom.property_map(lambda k: tau_for(k, True))
 
     if scattering > 0 and phantom.heterogeneity is not None:
+        # La heterogeneidad es ruido blanco *por celda*: la varianza de densidad por unidad
+        # de área escala como s²·dx², y en 2D la intensidad retrodispersada va como s²·dx²
+        # (una celda más pequeña aporta menos dispersor por celda pero hay más celdas por
+        # longitud de onda). Sin corrección, afinar la malla bajaba el speckle ~6 dB por
+        # cada mitad de dx. Escalar s con DX_REF/dx deja la intensidad constante.
         strength = phantom.property_map(lambda k: SCATTER_STRENGTH.get(k, 0.0)) * scattering
+        strength = strength * (DX_REF / phantom.grid.dx)
         rho = rho * (1.0 + strength * np.clip(phantom.heterogeneity, -3, 3))
     return ElasticMedium(rho, cp, cs, tau_p, tau_s, tau_sigma, f0)
