@@ -18,7 +18,13 @@ Además de las fracturas que abren la cortical que mira a la sonda (las que
 ve bien la ecografía), hay fracturas **internas** que no rompen esa
 superficie: intracorticales, de la cortical lejana, contusión ósea
 trabecular y fracturas por estrés (ver ``Fracture``). Los **tipos de cuerpo**
-(``BODY_TYPES``) escalan los grosores de piel, grasa, músculo y hueso.
+(``BODY_TYPES``) escalan los grosores de piel, grasa, músculo y hueso, y la
+calidad ósea (porosidad cortical, BV/TV) del modo realista.
+
+El parámetro ``realism`` de ``longitudinal_limb`` y ``cross_section_limb``
+añade la microestructura ósea y las estructuras del tejido blando (ver
+``realism.py``). Con su valor por defecto (``None`` o ``"basico"``) el fantoma
+es exactamente el de siempre.
 """
 
 from __future__ import annotations
@@ -30,11 +36,19 @@ import numpy as np
 
 from ..core.grid import Grid2D
 from .phantom import TISSUE_INDEX, Phantom
-from .roughness import RoughProfile
+from .realism import (
+    PoreSet, RealismSpec, SoftTissueStructure, band_coverage, dither, parallel_septa_coverage, resolve_realism,
+    sample_layer_pores, stream, trabecular_network, wall_coverage,
+)
+from .roughness import RoughProfile, SumProfile
 
 BONE_TISSUES = ("cortical_bone", "trabecular_bone", "marrow")
 SOFT_TISSUES = ("muscle", "fat", "skin")
 MEDULLARY_TISSUES = ("marrow", "trabecular_bone")
+#: Partes blandas que pueden ocupar un hematoma, una reacción perióstica o un
+#: vaso. Fascia y periostio sólo existen en el modo realista, así que en el
+#: básico la lista equivale a músculo y grasa.
+_DISPLACEABLE = ("muscle", "fat", "fascia", "periosteum")
 
 #: Radio de las bolsas de edema intertrabecular de la contusión ósea (m). Del
 #: orden de la separación entre trabéculas (0.5-1 mm): el edema ocupa los
@@ -233,6 +247,16 @@ class BodyType:
       médula ocupa lo que queda: con ``cortex < 1`` y ``bone ≈ 1`` la
       cortical se adelgaza por dentro (resorción endóstica), como en la
       osteoporosis.
+
+    Calidad ósea (sólo la usa el modo realista, ver ``RealismSpec.scaled``):
+
+    - ``porosity`` y ``pore_size``: multiplican la porosidad cortical y el
+      diámetro de los canales.
+    - ``trabecularization``: fracción interna del grosor cortical que pasa a
+      ser trabecular (se suma a la del ``RealismSpec``).
+    - ``bvtv``: multiplica la BV/TV de la red trabecular.
+    - ``pore_fill``: relleno de los poros corticales (``None`` = el del
+      ``RealismSpec``).
     """
 
     name: str = "normal"
@@ -241,6 +265,11 @@ class BodyType:
     muscle: float = 1.0
     cortex: float = 1.0
     bone: float = 1.0
+    porosity: float = 1.0
+    pore_size: float = 1.0
+    trabecularization: float = 0.0
+    bvtv: float = 1.0
+    pore_fill: str | None = None
 
 
 #: Tipos de cuerpo con nombre. Los factores son estimaciones a partir de
@@ -271,10 +300,17 @@ class BodyType:
 #:   Bone 27:351, 2000; Nikander et al., J Bone Miner Res 20:520, 2005): área
 #:   cortical +10-25 % → grosor 1.15 y diámetro 1.05.
 #:
-#: No se modela (las propiedades de los tejidos son fijas): la porosidad
-#: cortical de la osteoporosis (del 5 % al 15-30 %, que baja la velocidad del
-#: sonido en la cortical), la pérdida de densidad trabecular ni la
-#: infiltración grasa del músculo en ancianos y obesos.
+#: - Calidad ósea del anciano osteoporótico (sólo en el modo realista): la
+#:   porosidad cortical pasa del 5 % a ~18 % (rango 10-30 %: Bousson et al.,
+#:   J Bone Miner Res 16:1308, 2001; Granke et al., Bone 49:1020, 2011),
+#:   sobre todo porque los poros se agrandan (diámetro ×1.8: Thomas, Feik &
+#:   Clement, J Anat 209:219, 2006); el cuarto interno de la cortical se
+#:   trabeculariza (Zebaze et al., Lancet 375:1729, 2010) y las cavidades se
+#:   suponen llenas de médula grasa; la BV/TV trabecular baja un 40 % (de
+#:   0.20 a 0.12, valores típicos de la tibia proximal osteoporótica; Ding et
+#:   al., J Orthop Res 20:615, 2002).
+#:
+#: No se modela: la infiltración grasa del músculo en ancianos y obesos.
 BODY_TYPES: dict[str, BodyType] = {
     b.name: b
     for b in [
@@ -283,7 +319,8 @@ BODY_TYPES: dict[str, BodyType] = {
         BodyType("sobrepeso", skin=1.05, fat=1.7, muscle=1.05, cortex=1.0, bone=1.02),
         BodyType("obeso", skin=1.15, fat=3.0, muscle=1.1, cortex=1.05, bone=1.03),
         BodyType("musculoso", skin=1.0, fat=0.6, muscle=1.35, cortex=1.15, bone=1.05),
-        BodyType("anciano_osteoporotico", skin=0.8, fat=0.9, muscle=0.7, cortex=0.6, bone=1.03),
+        BodyType("anciano_osteoporotico", skin=0.8, fat=0.9, muscle=0.7, cortex=0.6, bone=1.03, porosity=3.6,
+                 pore_size=1.8, trabecularization=0.25, bvtv=0.6, pore_fill="marrow"),
     ]
 }
 
@@ -294,6 +331,15 @@ _MIN_MEDULLA = 0.5e-3
 
 def _body(body: str | BodyType) -> BodyType:
     return BODY_TYPES[body] if isinstance(body, str) else body
+
+
+def _realism_for(realism: str | RealismSpec | None, body: str | BodyType | None, spec_body: str) -> RealismSpec | None:
+    """El ``RealismSpec`` pedido ajustado a la calidad ósea del tipo de cuerpo (``None`` = básico)."""
+    real = resolve_realism(realism)
+    if real is None:
+        return None
+    b = _body(body) if body is not None else BODY_TYPES.get(spec_body, BODY_TYPES["normal"])
+    return real.scaled(b.porosity, b.pore_size, b.trabecularization, b.bvtv, b.pore_fill)
 
 
 def with_body_type(spec: str | LimbSpec | CrossSectionSpec, body: str | BodyType) -> LimbSpec | CrossSectionSpec:
@@ -338,8 +384,8 @@ def random_body_type(rng: np.random.Generator, names: Sequence[str] | None = Non
     names = tuple(names) if names is not None else tuple(BODY_TYPES)
     b = BODY_TYPES[str(rng.choice(names))]
     k = np.exp(rng.normal(0.0, spread, 5))
-    return BodyType(b.name, skin=b.skin * k[0], fat=b.fat * k[1], muscle=b.muscle * k[2], cortex=b.cortex * k[3],
-                    bone=b.bone * (1.0 + 0.3 * (k[4] - 1.0)))
+    return replace(b, skin=b.skin * k[0], fat=b.fat * k[1], muscle=b.muscle * k[2], cortex=b.cortex * k[3],
+                   bone=b.bone * (1.0 + 0.3 * (k[4] - 1.0)))
 
 
 # --------------------------------------------------------------------------
@@ -363,14 +409,67 @@ def _stack_labels(Z: np.ndarray, zs: np.ndarray, tissues: list[str], background:
     return lut[count]
 
 
-def _limb_labels(Z: np.ndarray, zs: np.ndarray, tissues: list[str], spec: LimbSpec) -> np.ndarray:
-    """Etiquetas de las capas más el hueso trabecular que tapiza los endostios."""
+def _limb_labels(Z: np.ndarray, zs: np.ndarray, tissues: list[str], spec: LimbSpec,
+                 soft: _LongitudinalSoft | None = None) -> np.ndarray:
+    """Etiquetas de las capas más el hueso trabecular que tapiza los endostios (y el tejido blando realista)."""
     labels = _stack_labels(Z, zs, tissues, spec.background)
     if spec.trabecular > 0:
         med = labels == TISSUE_INDEX[spec.medullary]
         lining = (Z < zs[4][None, :] + spec.trabecular) | (Z >= zs[5][None, :] - spec.trabecular)
         labels[med & lining] = TISSUE_INDEX["trabecular_bone"]
+    if soft is not None:
+        soft.apply(labels, Z, zs)
     return labels
+
+
+class _LongitudinalSoft:
+    """Fascias, septos y periostio de un corte longitudinal.
+
+    La geometría que no depende de las capas (septos del músculo y de la
+    grasa, ondulación de la fascia superficial, campo de *dithering*) se
+    calcula una vez; ``apply`` la recorta a las capas de un juego de
+    interfaces, de modo que el fragmento desplazado de una fractura lleva su
+    periostio con él.
+    """
+
+    def __init__(self, soft: SoftTissueStructure, grid: Grid2D, X: np.ndarray, Z: np.ndarray, seed: int):
+        self.soft, self.dx = soft, grid.dx
+        self.u = stream(seed, "dither").random(grid.shape)
+        theta = np.radians(soft.pennation_deg)
+        rng = stream(seed, "septa")
+        px, pz = X.ravel(), Z.ravel()
+        self.muscle_near = parallel_septa_coverage(px, pz, theta, soft.perimysium_spacing, soft.perimysium_thickness,
+                                                   grid.dx, rng).reshape(grid.shape)
+        self.muscle_far = parallel_septa_coverage(px, pz, -theta, soft.perimysium_spacing, soft.perimysium_thickness,
+                                                  grid.dx, rng).reshape(grid.shape)
+        # Lobulillos algo más altos que anchos: los septos de la grasa (retinacula
+        # cutis) van de la piel a la fascia, casi perpendiculares a ella.
+        self.lobules = wall_coverage(px, pz, soft.fat_lobule_size, soft.fat_septum_thickness, grid.dx,
+                                     stream(seed, "lobules"), stretch=1.3, angle=np.pi / 2,
+                                     removed=0.3).reshape(grid.shape)
+        frng = stream(seed, "fascia")
+        s = grid.x - grid.x0
+        self.wave_near = RoughProfile(grid.width, 0.25e-3, 4e-3, frng)(s)
+        self.wave_far = RoughProfile(grid.width, 0.25e-3, 4e-3, frng)(s)
+
+    def _band(self, Z, center, thickness):
+        return dither(band_coverage(Z - center[None, :], 0.5 * thickness, self.dx), self.u)
+
+    def apply(self, labels: np.ndarray, Z: np.ndarray, zs: np.ndarray) -> None:
+        soft, t = self.soft, TISSUE_INDEX
+        fat, mus, fas, per = t["fat"], t["muscle"], t["fascia"], t["periosteum"]
+        labels[(labels == fat) & dither(self.lobules, self.u)] = fas
+        near = Z < zs[3][None, :]
+        septa = np.where(near, self.muscle_near, self.muscle_far)
+        labels[(labels == mus) & dither(septa, self.u)] = fas
+        f = soft.superficial_fascia_depth
+        for center in (zs[1] + f * (zs[2] - zs[1]) + self.wave_near, zs[8] - f * (zs[8] - zs[7]) + self.wave_far):
+            labels[(labels == fat) & self._band(Z, center, soft.superficial_fascia)] = fas
+        for center in (zs[2] - 0.5 * soft.deep_fascia, zs[7] + 0.5 * soft.deep_fascia):
+            labels[(labels == fat) & self._band(Z, center, soft.deep_fascia)] = fas
+        displaceable = np.isin(labels, [fat, mus, fas])
+        for center in (zs[3] - 0.5 * soft.periosteum, zs[6] + 0.5 * soft.periosteum):
+            labels[displaceable & self._band(Z, center, soft.periosteum)] = per
 
 
 def _layer_coordinate(Z: np.ndarray, zs: np.ndarray) -> np.ndarray:
@@ -403,6 +502,7 @@ def longitudinal_limb(
     seed: int = 0,
     bottom_margin: float = 3e-3,
     body: str | BodyType | None = None,
+    realism: str | RealismSpec | None = None,
 ) -> Phantom:
     """Corte longitudinal de una extremidad, centrado en x = 0.
 
@@ -410,10 +510,17 @@ def longitudinal_limb(
     ``depth`` por defecto abarca la extremidad completa más un margen.
     ``body``: tipo de cuerpo (nombre de ``BODY_TYPES`` o ``BodyType``) que
     escala los grosores del preset.
+    ``realism``: ``None`` o ``"basico"`` (por defecto, el fantoma de
+    siempre), ``"realista"`` o un ``RealismSpec``: porosidad cortical, red
+    trabecular, rugosidad multiescala y fascias, septos y periostio. La
+    microestructura ósea se ajusta al tipo de cuerpo (porosidad del anciano
+    osteoporótico). Usa subflujos aleatorios propios: la anatomía de capas y
+    la fractura son las mismas que en el modo básico con la misma semilla.
     """
     spec = PRESETS[preset] if isinstance(preset, str) else preset
     if body is not None:
         spec = with_body_type(spec, body)
+    real = _realism_for(realism, body, spec.body)
     rng = np.random.default_rng(seed)
     layers = spec.layers()
     tissues = [t for t, _ in layers]
@@ -426,19 +533,38 @@ def longitudinal_limb(
 
     nominal = spec.standoff + np.concatenate([[0.0], np.cumsum(thick)])
     profiles = [RoughProfile(width, rms, cl, rng) for rms, cl in _interface_roughness(spec)]
-    s = x - grid.x0
-    zs = np.array([nominal[k] + profiles[k](s) for k in range(len(nominal))])
-    bone_if = slice(3, 7)  # interfaces que pertenecen al hueso
-    zs[bone_if] += np.tan(np.radians(spec.bone_tilt_deg)) * x[None, :]
-    zs = _monotonic(zs, thick)
+    rough_rng = stream(seed, "roughness") if real is not None else None
+    if real is not None and real.roughness is not None:
+        for k, kind in ((3, "periosteal"), (4, "endosteal"), (5, "endosteal"), (6, "periosteal")):
+            profiles[k] = SumProfile(profiles[k], real.roughness.profile(kind, width, rough_rng))
+    tilt = np.tan(np.radians(spec.bone_tilt_deg))
 
-    labels = _limb_labels(Z, zs, tissues, spec)
+    def interfaces(xq: np.ndarray) -> np.ndarray:
+        """Profundidad de las 10 interfaces en las abscisas ``xq`` (independiente de la malla)."""
+        out = np.array([nominal[k] + profiles[k](xq - grid.x0) for k in range(len(nominal))])
+        out[3:7] += tilt * xq[None, :]  # interfaces que pertenecen al hueso
+        return _monotonic(out, thick)
+
+    zs = interfaces(x)
+    soft = _LongitudinalSoft(real.soft, grid, X, Z, seed) if real is not None and real.soft is not None else None
+    labels = _limb_labels(Z, zs, tissues, spec, soft)
+    healthy_labels = labels.copy() if real is not None else None
     masks = {k: np.zeros(grid.shape, dtype=bool) for k in ("fracture", "hematoma", "edema")}
 
+    shift = None
     if fracture is not None:
-        labels = _apply_longitudinal_fracture(grid, X, Z, zs, thick, tissues, spec, fracture, labels, masks, rng)
+        micro = None
+        if real is not None and real.roughness is not None:
+            def micro(length):
+                return real.roughness.profile("fracture", length, rough_rng, scale=fracture.roughness)
+        labels, shift = _apply_longitudinal_fracture(grid, X, Z, zs, thick, tissues, spec, fracture, labels, masks,
+                                                     rng, soft, micro)
 
     _add_vessels(labels, X, Z, nominal[0], spec.vessels)
+    porosity, micro_info = None, None
+    if real is not None:
+        porosity, micro_info = _longitudinal_bone(real, grid, X, Z, labels, healthy_labels, masks, interfaces, tilt,
+                                                  shift, seed)
     het = np.random.default_rng(seed + 7919).standard_normal(grid.shape).astype(np.float32)
     meta = {
         "view": "longitudinal",
@@ -452,10 +578,91 @@ def longitudinal_limb(
         "bone_bottom_depth": float(np.interp(0.0, x, zs[6])),
         "skin_depth": float(np.interp(0.0, x, zs[0])),
     }
-    return Phantom(grid, labels, masks, het, meta)
+    if real is None:
+        return Phantom(grid, labels, masks, het, meta)
+    meta["realism"] = asdict(real)
+    meta["microstructure"] = micro_info
+    fill = real.cortical.fill if real.cortical is not None else "blood"
+    return Phantom(grid, labels, masks, het, meta, porosity, fill)
 
 
-def _apply_longitudinal_fracture(grid, X, Z, zs, thick, tissues, spec, fr: Fracture, labels, masks, rng):
+def _longitudinal_bone(real: RealismSpec, grid: Grid2D, X, Z, labels, healthy_labels, masks, interfaces, tilt: float,
+                       shift: np.ndarray | None, seed: int) -> tuple[np.ndarray, dict]:
+    """Mapa de porosidad: poros corticales y red trabecular (ver ``realism.py``).
+
+    Las celdas sin microestructura quedan a ``NaN`` (propiedades de la tabla);
+    sin ninguna, el mapa es ``None``.
+
+    ``shift`` es el desplazamiento en profundidad de cada celda respecto a la
+    geometría sana (el fragmento distal de una fractura desplazada): poros y
+    trabéculas se mueven con su fragmento.
+    """
+    porosity = np.full(grid.shape, np.nan, dtype=np.float32)
+    info: dict = {}
+    cort = labels == TISSUE_INDEX["cortical_bone"]
+    if real.cortical is not None and cort.any():
+        rng = stream(seed, "pores")
+        pores = PoreSet()
+        x_range = (grid.x0 - grid.dx / 2, grid.x0 + grid.width - grid.dx / 2)
+
+        def to_xz(s_, d_):
+            return (s_, d_), np.ones_like(s_)
+
+        for outer, inner in ((3, 4), (6, 5)):
+            pores.extend(sample_layer_pores(real.cortical, rng, lambda s_, k=outer: interfaces(s_)[k],
+                                            lambda s_, k=inner: interfaces(s_)[k], x_range, to_xz,
+                                            float(np.arctan(tilt)), real.cortical.canal_aspect))
+        phi, n_explicit = pores.rasterize(grid, real.resolve_cells)
+        if shift is not None:
+            for dz in np.unique(shift[shift != 0]):
+                phi_d, _ = pores.shifted(float(dz)).rasterize(grid, real.resolve_cells)
+                phi = np.where(shift == dz, phi_d, phi)
+        porosity[cort] = phi[cort]
+        info.update(cortical_porosity=float(porosity[cort].mean()), pores=int(pores.x.size),
+                    explicit_pores=n_explicit)
+    _trabecular_into(real, grid, X, Z, labels, healthy_labels, masks, shift, seed, porosity, info)
+    return (porosity if np.isfinite(porosity).any() else None), info
+
+
+def _trabecular_into(real: RealismSpec, grid: Grid2D, X, Z, labels, healthy_labels, masks, shift, seed: int,
+                     porosity: np.ndarray, info: dict) -> None:
+    """Red trabecular en las celdas de hueso trabecular (escribe ``porosity`` e ``info``).
+
+    Con la red dibujada explícitamente, las trabéculas atraviesan el edema de
+    una contusión: las celdas de edema que eran hueso trabecular en el
+    fantoma sano y caen sobre una trabécula vuelven a ser hueso (el edema
+    ocupa los espacios medulares, no el armazón).
+    """
+    trab_idx = TISSUE_INDEX["trabecular_bone"]
+    trab = labels == trab_idx
+    if real.trabecular is None or not trab.any():
+        return
+    explicit = real.trabecular.thickness >= real.resolve_cells * grid.dx
+    region = trab.copy()
+    restore = np.zeros(grid.shape, dtype=bool)
+    if explicit:
+        restore = (healthy_labels == trab_idx) & (labels == TISSUE_INDEX["edema"])
+        region |= restore
+    dz = shift[region] if shift is not None else 0.0
+    res = trabecular_network(X[region], Z[region] - dz, real.trabecular, grid.dx, stream(seed, "trabecular"),
+                             real.resolve_cells)
+    porosity[region] = res.porosity
+    struts = np.zeros(grid.shape, dtype=bool)
+    struts[region] = res.porosity < 0.5
+    labels[struts & restore] = trab_idx
+    masks["edema"] &= ~(struts & restore)
+    info.update(bvtv=res.bvtv, trabecular_thickness=res.thickness,
+                trabecular_separation=res.thickness * (1.0 / max(res.bvtv, 1e-9) - 1.0),
+                trabecular_explicit=res.explicit)
+
+
+def _apply_longitudinal_fracture(grid, X, Z, zs, thick, tissues, spec, fr: Fracture, labels, masks, rng,
+                                 soft: _LongitudinalSoft | None = None, micro=None):
+    """Aplica la fractura; devuelve las etiquetas y el desplazamiento en profundidad de cada celda.
+
+    ``micro(longitud)`` añade la rugosidad fina de la superficie de fractura
+    (modo realista) sin consumir números del generador ``rng``.
+    """
     x = grid.x
     xc = fr.position
     z_top = float(np.interp(xc, x, zs[3]))
@@ -464,6 +671,8 @@ def _apply_longitudinal_fracture(grid, X, Z, zs, thick, tissues, spec, fr: Fract
     theta = np.radians(fr.angle_deg)
     crack_len = 2.0 * (z_bottom - z_top) + 10e-3
     crack_profile = RoughProfile(crack_len, fr.roughness, max(fr.gap, 0.3e-3), rng)
+    if micro is not None:
+        crack_profile = SumProfile(crack_profile, micro(crack_len))
 
     def signed_distance(xc_, theta_):
         along = (X - xc_) * np.sin(theta_) + (Z - zc) * np.cos(theta_)
@@ -477,7 +686,7 @@ def _apply_longitudinal_fracture(grid, X, Z, zs, thick, tissues, spec, fr: Fract
         zs_d = zs.copy()
         zs_d[3:7] += fr.displacement
         zs_d = _monotonic(zs_d, thick)
-        labels_d = _limb_labels(Z, zs_d, tissues, spec)
+        labels_d = _limb_labels(Z, zs_d, tissues, spec, soft)
     else:
         zs_d, labels_d = zs, labels
 
@@ -538,17 +747,18 @@ def _apply_longitudinal_fracture(grid, X, Z, zs, thick, tissues, spec, fr: Fract
 
     # Hematoma perióstico en las superficies que la grieta atraviesa
     if fr.gap > 0 and fr.hematoma_thickness > 0 and fr.hematoma_length > 0:
-        soft = np.isin(out, [TISSUE_INDEX[t] for t in ("muscle", "fat")])
+        displaceable = np.isin(out, [TISSUE_INDEX[t] for t in _DISPLACEABLE])
         if fr.span is None:
             surfaces = [z_top] + ([z_bottom] if fr.depth_fraction >= 1.0 else [])
         else:
             surfaces = ([z_top] if fr.span[0] <= 0 else []) + ([z_bottom] if fr.span[1] >= 3 else [])
         for zsurf in surfaces:
             ell = ((X - xc) / (fr.hematoma_length / 2)) ** 2 + ((Z - zsurf) / fr.hematoma_thickness) ** 2 <= 1.0
-            hem = ell & soft
+            hem = ell & displaceable
             out[hem] = hem_idx
             masks["hematoma"] |= hem
-    return out
+    shift = np.where(dist > 0, fr.displacement, 0.0) if fr.displacement != 0.0 else None
+    return out, shift
 
 
 def _in_ellipse(X, Z, center, semi) -> np.ndarray:
@@ -608,7 +818,7 @@ def _add_reactions(X, Z, out, masks, fr, xc: float, z_periosteum: float, z_endos
         out[lens] = TISSUE_INDEX["cortical_bone"]
         masks["edema"] &= ~lens
     if fr.periosteal_reaction > 0:
-        soft_idx = [TISSUE_INDEX[t] for t in ("muscle", "fat")]
+        soft_idx = [TISSUE_INDEX[t] for t in _DISPLACEABLE]
         lens = np.isin(out, soft_idx) & _in_ellipse(X, Z, (xc, z_periosteum), (half_len, fr.periosteal_reaction))
         out[lens] = TISSUE_INDEX["trabecular_bone"]
         # Ribete de edema perióstico de ~0.5 mm alrededor del hueso nuevo
@@ -619,7 +829,7 @@ def _add_reactions(X, Z, out, masks, fr, xc: float, z_periosteum: float, z_endos
 
 
 def _add_vessels(labels, X, Z, skin_z, vessels):
-    soft = np.isin(labels, [TISSUE_INDEX["muscle"], TISSUE_INDEX["fat"]])
+    soft = np.isin(labels, [TISSUE_INDEX[t] for t in _DISPLACEABLE])
     for vx, vdepth, r in vessels:
         inside = (X - vx) ** 2 + (Z - (skin_z + vdepth)) ** 2 <= r**2
         labels[inside & soft] = TISSUE_INDEX["blood"]
@@ -736,6 +946,11 @@ CROSS_PRESETS: dict[str, CrossSectionSpec] = {
 }
 
 
+#: Alargamiento de los canales corticales en el corte transversal: corren casi
+#: perpendiculares al plano y salen como círculos algo achatados.
+CROSS_CANAL_ASPECT = 1.3
+
+
 def cross_section_limb(
     preset: str | CrossSectionSpec = "pierna",
     fracture: RingFracture | None = None,
@@ -743,14 +958,18 @@ def cross_section_limb(
     margin: float = 5e-3,
     seed: int = 0,
     body: str | BodyType | None = None,
+    realism: str | RealismSpec | None = None,
 ) -> Phantom:
     """Sección axial de una extremidad centrada en (0, 0).
 
     ``body``: tipo de cuerpo (nombre de ``BODY_TYPES`` o ``BodyType``).
+    ``realism``: como en ``longitudinal_limb``. En este corte los canales
+    corticales salen casi circulares y el perimisio forma polígonos.
     """
     spec = CROSS_PRESETS[preset] if isinstance(preset, str) else preset
     if body is not None:
         spec = with_body_type(spec, body)
+    real = _realism_for(realism, body, spec.body)
     rng = np.random.default_rng(seed)
     size = 2 * (spec.radius + margin)
     grid = Grid2D.from_size(size, size, dx, x0=-size / 2, z0=-size / 2)
@@ -772,6 +991,9 @@ def cross_section_limb(
     labels[R <= r_fat] = TISSUE_INDEX["fat"]
     labels[R <= r_mus] = TISSUE_INDEX["muscle"]
 
+    rough_rng = stream(seed, "roughness") if real is not None else None
+    fine_rough = real is not None and real.roughness is not None
+    bone_geom = []
     for b in spec.bones:
         bx, bz = b.center
         rb = np.hypot(X - bx, Z - bz)
@@ -779,19 +1001,33 @@ def cross_section_limb(
         cb = 2 * np.pi * b.outer_radius
         h_out = RoughProfile(cb, *spec.periosteal_rough, rng, periodic=True)
         h_in = RoughProfile(cb, *spec.endosteal_rough, rng, periodic=True)
+        if fine_rough:
+            h_out = SumProfile(h_out, real.roughness.profile("periosteal", cb, rough_rng, periodic=True))
+            h_in = SumProfile(h_in, real.roughness.profile("endosteal", cb, rough_rng, periodic=True))
         r_out = b.outer_radius + h_out(thb * b.outer_radius)
         r_in = np.maximum(b.outer_radius - b.cortex + h_in(thb * b.outer_radius), 0.3e-3)
         labels[rb <= r_out] = TISSUE_INDEX["cortical_bone"]
         labels[rb <= r_in] = TISSUE_INDEX[b.medullary]
+        bone_geom.append((b, h_out, h_in, rb, r_out))
 
-    soft = np.isin(labels, [TISSUE_INDEX["muscle"], TISSUE_INDEX["fat"]])
+    if real is not None and real.soft is not None:
+        _cross_soft(real.soft, spec, grid, X, Z, R, TH, labels, r_fat, r_mus, bone_geom, seed)
+    soft = np.isin(labels, [TISSUE_INDEX[t] for t in _DISPLACEABLE])
     for vx, vz, r in spec.vessels:
         labels[((X - vx) ** 2 + (Z - vz) ** 2 <= r**2) & soft] = TISSUE_INDEX["blood"]
 
+    healthy_labels = labels.copy() if real is not None else None
     masks = {k: np.zeros(grid.shape, dtype=bool) for k in ("fracture", "hematoma", "edema")}
     if fracture is not None:
-        _apply_ring_fracture(X, Z, spec, fracture, labels, masks, rng, dx)
+        micro = None
+        if fine_rough:
+            def micro(length):
+                return real.roughness.profile("fracture", length, rough_rng, scale=fracture.roughness)
+        _apply_ring_fracture(X, Z, spec, fracture, labels, masks, rng, dx, micro)
 
+    porosity, micro_info = None, None
+    if real is not None:
+        porosity, micro_info = _cross_bone(real, grid, X, Z, labels, healthy_labels, masks, bone_geom, seed)
     het = np.random.default_rng(seed + 7919).standard_normal(grid.shape).astype(np.float32)
     meta = {
         "view": "cross_section",
@@ -802,7 +1038,74 @@ def cross_section_limb(
         "label": int(fracture is not None),
         "body_type": spec.body,
     }
-    return Phantom(grid, labels, masks, het, meta)
+    if real is None:
+        return Phantom(grid, labels, masks, het, meta)
+    meta["realism"] = asdict(real)
+    meta["microstructure"] = micro_info
+    fill = real.cortical.fill if real.cortical is not None else "blood"
+    return Phantom(grid, labels, masks, het, meta, porosity, fill)
+
+
+def _cross_soft(soft: SoftTissueStructure, spec: CrossSectionSpec, grid: Grid2D, X, Z, R, TH, labels, r_fat, r_mus,
+                bone_geom, seed: int) -> None:
+    """Fascias, septos y periostio del corte transversal.
+
+    Los fascículos musculares y los lobulillos grasos se cortan de través:
+    su perimisio y sus septos forman una red de polígonos (paredes de
+    Voronoi). Fascia superficial, fascia profunda y periostio son anillos que
+    siguen la rugosidad de su interfaz.
+    """
+    t = TISSUE_INDEX
+    fat, mus, fas, per = t["fat"], t["muscle"], t["fascia"], t["periosteum"]
+    dx = grid.dx
+    u = stream(seed, "dither").random(grid.shape)
+    for tissue, size, thickness, name, removed in (
+        (fat, soft.fat_lobule_size, soft.fat_septum_thickness, "lobules", 0.3),
+        (mus, soft.perimysium_spacing, soft.perimysium_thickness, "septa", 0.2),
+    ):
+        m = labels == tissue
+        cov = wall_coverage(X[m], Z[m], size, thickness, dx, stream(seed, name), removed=removed)
+        labels[m] = np.where(cov > u[m], fas, tissue)
+    wave = RoughProfile(2 * np.pi * spec.radius, 0.25e-3, 4e-3, stream(seed, "fascia"), periodic=True)(TH * spec.radius)
+    r_sf = r_fat - soft.superficial_fascia_depth * (r_fat - r_mus) + wave
+    labels[(labels == fat) & dither(band_coverage(R - r_sf, 0.5 * soft.superficial_fascia, dx), u)] = fas
+    deep = band_coverage(R - (r_mus + 0.5 * soft.deep_fascia), 0.5 * soft.deep_fascia, dx)
+    labels[(labels == fat) & dither(deep, u)] = fas
+    displaceable = np.isin(labels, [fat, mus, fas])
+    for _, _, _, rb, r_out in bone_geom:
+        band = band_coverage(rb - (r_out + 0.5 * soft.periosteum), 0.5 * soft.periosteum, dx)
+        labels[displaceable & dither(band, u)] = per
+
+
+def _cross_bone(real: RealismSpec, grid: Grid2D, X, Z, labels, healthy_labels, masks, bone_geom,
+                seed: int) -> tuple[np.ndarray, dict]:
+    """Mapa de porosidad del corte transversal: canales en cada anillo cortical y red trabecular."""
+    porosity = np.full(grid.shape, np.nan, dtype=np.float32)
+    info: dict = {}
+    cort = labels == TISSUE_INDEX["cortical_bone"]
+    if real.cortical is not None and cort.any():
+        rng = stream(seed, "pores")
+        pores = PoreSet()
+        for b, h_out, h_in, _, _ in bone_geom:
+            r0, (bx, bz) = b.outer_radius, b.center
+
+            def outer(th, h=h_out, r0=r0):
+                return r0 + h(th * r0)
+
+            def inner(th, h=h_in, r0=r0, c=b.cortex):
+                return np.maximum(r0 - c + h(th * r0), 0.3e-3)
+
+            def to_xz(th, r, bx=bx, bz=bz):
+                return (bx + r * np.sin(th), bz - r * np.cos(th)), r
+
+            pores.extend(sample_layer_pores(real.cortical, rng, outer, inner, (-np.pi, np.pi), to_xz, 0.0,
+                                            CROSS_CANAL_ASPECT, oriented=False))
+        phi, n_explicit = pores.rasterize(grid, real.resolve_cells)
+        porosity[cort] = phi[cort]
+        info.update(cortical_porosity=float(porosity[cort].mean()), pores=int(pores.x.size),
+                    explicit_pores=n_explicit)
+    _trabecular_into(real, grid, X, Z, labels, healthy_labels, masks, None, seed, porosity, info)
+    return (porosity if np.isfinite(porosity).any() else None), info
 
 
 def _tangent_ellipse(X, Z, point, normal, semi) -> np.ndarray:
@@ -813,7 +1116,7 @@ def _tangent_ellipse(X, Z, point, normal, semi) -> np.ndarray:
     return (t_ / semi[0]) ** 2 + (n_ / semi[1]) ** 2 <= 1.0
 
 
-def _apply_ring_fracture(X, Z, spec: CrossSectionSpec, fr: RingFracture, labels, masks, rng, dx: float):
+def _apply_ring_fracture(X, Z, spec: CrossSectionSpec, fr: RingFracture, labels, masks, rng, dx: float, micro=None):
     b = spec.bones[fr.bone_index]
     bx, bz = b.center
     phi = np.radians(fr.angle_deg)
@@ -821,6 +1124,8 @@ def _apply_ring_fracture(X, Z, spec: CrossSectionSpec, fr: RingFracture, labels,
     along = (X - bx) * ux + (Z - bz) * uz
     across = (X - bx) * uz - (Z - bz) * ux
     prof = RoughProfile(2 * b.outer_radius, fr.roughness, max(fr.gap, 0.3e-3), rng)
+    if micro is not None:
+        prof = SumProfile(prof, micro(2 * b.outer_radius))
     dist = across - prof(along + b.outer_radius)
     cort = labels == TISSUE_INDEX["cortical_bone"]
     rb = np.hypot(X - bx, Z - bz)
@@ -845,7 +1150,7 @@ def _apply_ring_fracture(X, Z, spec: CrossSectionSpec, fr: RingFracture, labels,
     masks["edema"] |= edema
 
     px, pz = bx + ux * b.outer_radius, bz + uz * b.outer_radius
-    soft_idx = [TISSUE_INDEX["muscle"], TISSUE_INDEX["fat"]]
+    soft_idx = [TISSUE_INDEX[t] for t in _DISPLACEABLE]
     if fr.endosteal_reaction > 0:
         med_now = np.isin(labels, [TISSUE_INDEX[t] for t in (*MEDULLARY_TISSUES, "edema")])
         lens = med_now & _tangent_ellipse(X, Z, (ex, ez), (ux, uz), (fr.reaction_length / 2, fr.endosteal_reaction))

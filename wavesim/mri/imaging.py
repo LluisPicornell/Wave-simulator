@@ -41,8 +41,9 @@ def mri_scan(phantom: Phantom, sequence: Sequence | str = "T2", b0: float = 1.5,
     seq = resolve(sequence, b0)
     rng = rng or np.random.default_rng(0)
     g = phantom.grid
-    sig = {k: tissue_signal(k, seq, b0) for k in phantom.present_tissues()}
-    ideal = phantom.property_map(lambda k: sig[k])
+    # La señal de una celda porosa es la suma de la de cada fracción de volumen (volumen parcial)
+    sig = {k: tissue_signal(k, seq, b0) for k in phantom.property_tissues()}
+    ideal = phantom.property_map(lambda k: sig[k], physics="mri")
     if texture and phantom.heterogeneity is not None:
         ideal = ideal * (1 + texture * np.clip(phantom.heterogeneity, -3, 3))
 
@@ -54,7 +55,8 @@ def mri_scan(phantom: Phantom, sequence: Sequence | str = "T2", b0: float = 1.5,
     kc = k[cz - mz // 2: cz - mz // 2 + mz, cx - mx // 2: cx - mx // 2 + mx]
     img = np.fft.ifft2(np.fft.ifftshift(kc)) * (mz * mx) / (g.nz * g.nx)
 
-    ref = sig.get("muscle", max(sig.values()))
+    present = phantom.present_tissues()
+    ref = sig["muscle"] if "muscle" in present else max(sig[k] for k in present)
     sigma = ref / snr if snr else 0.0
     if sigma:
         img = img + rng.normal(0, sigma, img.shape) + 1j * rng.normal(0, sigma, img.shape)

@@ -78,8 +78,10 @@ def acquire(phantom: Phantom, angles_deg, spectrum: XraySpectrum | None = None, 
     spectrum = spectrum or tube_spectrum()
     g = phantom.grid
     det = detector_axis(g, det_spacing)
-    coef = {k: basis_coefficients(k, spectrum) for k in phantom.present_tissues()}
-    maps = np.stack([phantom.property_map(lambda k: coef[k][0]), phantom.property_map(lambda k: coef[k][1])])
+    # Los coeficientes son lineales en mu: la mezcla lineal de la porosidad es exacta
+    coef = {k: basis_coefficients(k, spectrum) for k in phantom.property_tissues()}
+    maps = np.stack([phantom.property_map(lambda k: coef[k][0], physics="xray"),
+                     phantom.property_map(lambda k: coef[k][1], physics="xray")])
     lw, lb = project(maps, g, angles_deg, det)  # longitudes equivalentes de agua y hueso (m)
     e = spectrum.energies_kev
     mu_w = xd.linear_attenuation("water", e)

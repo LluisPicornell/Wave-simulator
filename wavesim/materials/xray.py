@@ -51,7 +51,8 @@ ATOMIC = {  # Z, masa atómica
     "Ca": (20, 40.078), "Fe": (26, 55.845),
 }
 
-# Composición elemental en % de masa (ICRU-44; médula: Woodard & White 1986)
+# Composición elemental en % de masa (ICRU-44; médula: Woodard & White 1986;
+# fascia y periostio: "tejido conectivo" de ICRU-44)
 COMPOSITION: dict[str, dict[str, float]] = {
     "water": {"H": 11.19, "O": 88.81},
     "muscle": {"H": 10.2, "C": 14.3, "N": 3.4, "O": 71.0, "Na": 0.1, "P": 0.2, "S": 0.3, "Cl": 0.1, "K": 0.4},
@@ -60,12 +61,13 @@ COMPOSITION: dict[str, dict[str, float]] = {
     "skin": {"H": 10.0, "C": 20.4, "N": 4.2, "O": 64.5, "Na": 0.2, "P": 0.1, "S": 0.2, "Cl": 0.3, "K": 0.1},
     "blood": {"H": 10.2, "C": 11.0, "N": 3.3, "O": 74.5, "Na": 0.1, "P": 0.1, "S": 0.2, "Cl": 0.3, "K": 0.2, "Fe": 0.1},
     "marrow": {"H": 11.5, "C": 64.4, "N": 0.7, "O": 23.1, "Na": 0.1, "S": 0.1, "Cl": 0.1},
+    "fascia": {"H": 9.4, "C": 20.7, "N": 6.2, "O": 62.2, "Na": 0.6, "S": 0.6, "Cl": 0.3},
 }
 
 # Densidad másica en g/cm³ (ICRU-44 / IT'IS)
 DENSITY_G_CM3: dict[str, float] = {
     "water": 1.0, "air": 0.0012, "skin": 1.09, "fat": 0.95, "muscle": 1.05, "blood": 1.06,
-    "cortical_bone": 1.92, "marrow": 0.98, "aluminum": 2.699,
+    "cortical_bone": 1.92, "marrow": 0.98, "aluminum": 2.699, "fascia": 1.12,
 }
 
 # Tejidos definidos como mezcla por volumen de otros (fracciones de volumen).
@@ -73,6 +75,7 @@ VOLUME_MIXTURES: dict[str, tuple[tuple[str, float], ...]] = {
     "trabecular_bone": (("cortical_bone", 0.2), ("marrow", 0.8)),  # BV/TV ≈ 20 %
     "hematoma": (("blood", 1.0),),
     "edema": (("marrow", 0.6), ("blood", 0.4)),
+    "periosteum": (("fascia", 1.0),),
 }
 
 _PE_EXPONENT = 4.0

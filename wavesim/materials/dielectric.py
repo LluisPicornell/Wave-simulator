@@ -74,6 +74,15 @@ COLE_COLE: dict[str, ColeCole] = {
         ((3.0, 7.958 * PS, 0.20), (25.0, 15.915 * NS, 0.10), (5e3, 1591.549 * US, 0.10), (2e6, 15.915 * MS, 0.0)),
         0.0016,
     ),
+    # "Tendon" de la tabla 1 de Gabriel et al. (1996c): ε' = 45.6 y σ = 0.76 S/m a
+    # 1 GHz. Se usa para la fascia y el periostio, que son tejido conectivo denso
+    # de composición parecida (colágeno tipo I y ~60-70 % de agua); es una
+    # aproximación, no hay ajustes publicados para esos dos tejidos.
+    "fascia": ColeCole(
+        4.0,
+        ((42.0, 12.243 * PS, 0.10), (60.0, 6.366 * NS, 0.10), (6e4, 318.31 * US, 0.22), (2e7, 1.326 * MS, 0.0)),
+        0.25,
+    ),
     # agua pura a 25 °C (Debye simple); conductividad de agua ligeramente mineralizada
     "water": ColeCole(5.2, ((73.2, 8.27 * PS, 0.0),), 0.005),
     "air": ColeCole(1.0, (), 0.0),
@@ -85,6 +94,7 @@ COLE_COLE: dict[str, ColeCole] = {
 MIXTURES: dict[str, tuple[tuple[str, float], ...]] = {
     "hematoma": (("blood", 1.0),),
     "edema": (("marrow", 0.6), ("blood", 0.4)),
+    "periosteum": (("fascia", 1.0),),
 }
 
 GABRIEL_MAX_FREQ = 100e9
