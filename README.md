@@ -95,16 +95,19 @@ Cada script guarda sus figuras en `outputs/`:
 
 ### Resultado principal: ¿qué atraviesa un antebrazo de ~47 mm?
 
-Salida de `04_espectro_penetracion.py` (pérdida de intensidad al cruzarlo
-entero a incidencia normal, con reflexiones en las interfaces donde aplica):
+Salida de `04_espectro_penetracion.py`: pérdida de intensidad al cruzarlo
+entero a incidencia normal, rodeado de agua. Para radio y microondas las
+reflexiones se calculan de forma coherente (matriz de transferencia: las capas
+más finas que λ interfieren); para el ultrasonido, sumadas por interfaz (el
+pulso de banda ancha promedia la interferencia).
 
 | Onda | Pérdida | Comentario |
 |---|---|---|
 | Ultrasonido 1 MHz / 5 MHz | 15 / 42 dB | Atraviesa, pero el hueso refleja y atenúa mucho; por eso la ecografía ve la superficie del hueso y deja sombra debajo |
-| RF de RM 64 MHz | 14 dB | Penetra (por eso funciona la RM), pero λ en el tejido ≈ 50 cm: no da resolución por sí sola |
-| Microondas 2.45 GHz | 20 dB | Penetra unos cm; λ ≈ 1.8 cm en músculo: resolución muy pobre |
+| RF de RM 64 MHz | 3 dB | Penetra (por eso funciona la RM), pero λ en el tejido ≈ 50 cm: no da resolución por sí sola |
+| Microondas 915 MHz / 2.45 GHz | 9 / 21 dB | Penetran unos cm; λ ≈ 1.8 cm en músculo a 2.45 GHz: resolución muy pobre |
 | Ondas mm 60 GHz | 650 dB | Se absorben en la piel |
-| Terahercios 1 THz | 2350 dB | El agua los absorbe en ~50 µm |
+| Terahercios 1 THz | ~1900 dB | El agua los absorbe en ~50 µm |
 | Infrarrojo cercano 800 nm | 79 dB (difusa) | Algo de luz atraviesa, pero totalmente difusa: ningún fotón llega sin desviarse |
 | Luz verde 530 nm | 460 dB | La hemoglobina la absorbe |
 | UV 300 nm | > 3000 dB | No pasa de la epidermis |
@@ -195,9 +198,10 @@ tests/          validación física (pytest)
   orden de magnitud. Las de **RM** del edema, el hematoma y la piel son
   representativas. Cada módulo de `materials/` indica su fuente y su
   incertidumbre.
-- La atenuación del ultrasonido con un mecanismo de relajación reproduce la
-  ley ∝ f con un error de ±12 % en la banda del pulso. Se puede afinar con
-  `n_mechanisms=2` o `3` (más lento).
+- La atenuación del ultrasonido con un mecanismo de relajación (por defecto)
+  reproduce la ley ∝ f con un error de hasta ~14 % en la banda del pulso. Con
+  `n_mechanisms=2` el error baja a ~1 % en músculo (algo más lento); 3
+  mecanismos no mejoran con el reparto actual de tiempos de relajación.
 - 2D: la dispersión y la difracción de un objeto 3D no son idénticas a las de
   un corte. La "radiografía" de un corte 2D es un perfil 1D; la imagen de
   rayos X útil en 2D es el TAC.
