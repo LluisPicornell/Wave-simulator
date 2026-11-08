@@ -43,3 +43,43 @@ def fracture_visibility(healthy: np.ndarray, fractured: np.ndarray, roi: np.ndar
     if noise_sigma:
         out["cnr"] = out["mean_abs_change"] / noise_sigma
     return out
+
+
+# --------------------------------------------------------------------------
+# Señales: cambio de una forma de onda respecto a una referencia
+# --------------------------------------------------------------------------
+def residual_db(reference: np.ndarray, test: np.ndarray) -> float:
+    """Energía de la diferencia relativa a la de la referencia (dB): 10·log10(Σ(test−ref)² / Σref²).
+
+    Mide cualquier cambio de la forma de onda (amplitud, retardo o forma). Un
+    retardo de una fracción ε de periodo da unos 20·log10(2π·ε) dB; una
+    variación de amplitud ε, 20·log10(ε) dB.
+    """
+    diff = float(np.sum((np.asarray(test) - np.asarray(reference)) ** 2))
+    return 10.0 * np.log10(diff / (float(np.sum(np.asarray(reference) ** 2)) + 1e-300) + 1e-30)
+
+
+def energy_ratio_db(reference: np.ndarray, test: np.ndarray) -> float:
+    """Cambio de energía (dB) de ``test`` respecto a ``reference``: 10·log10(Σtest² / Σref²)."""
+    return 10.0 * np.log10((float(np.sum(np.asarray(test) ** 2)) + 1e-300) /
+                           (float(np.sum(np.asarray(reference) ** 2)) + 1e-300))
+
+
+def xcorr_delay(reference: np.ndarray, test: np.ndarray, dt: float) -> float:
+    """Retardo (s) de ``test`` respecto a ``reference`` (positivo = llega más tarde).
+
+    Máximo de la correlación cruzada con refinamiento parabólico (resolución
+    muy inferior a ``dt``). Sólo tiene sentido si las dos señales se parecen
+    y el retardo es menor que medio periodo de la portadora.
+    """
+    a, b = np.asarray(reference, float), np.asarray(test, float)
+    n = a.size
+    xc = np.fft.irfft(np.fft.rfft(b, 2 * n) * np.conj(np.fft.rfft(a, 2 * n)), 2 * n)
+    xc = np.concatenate([xc[-(n - 1):], xc[:n]])  # retardos de -(n-1) a n-1
+    k = int(np.argmax(xc))
+    shift = 0.0
+    if 0 < k < xc.size - 1:
+        y0, y1, y2 = xc[k - 1], xc[k], xc[k + 1]
+        den = y0 - 2 * y1 + y2
+        shift = 0.5 * (y0 - y2) / den if den != 0 else 0.0
+    return (k - (n - 1) + shift) * dt
