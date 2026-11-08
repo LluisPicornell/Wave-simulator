@@ -47,7 +47,9 @@ muslo). Incluyen:
 - **tipos de cuerpo** (`BODY_TYPES`: delgado, normal, sobrepeso, obeso,
   musculoso, anciano osteoporótico) que escalan piel, grasa, músculo y hueso
   según rangos publicados; los datasets los sortean;
-- máscara de verdad de terreno de la fractura (para segmentación).
+- máscara de verdad de terreno de la fractura (para segmentación);
+- un **modo realista** opcional (`realism="realista"`, ver más abajo): hueso
+  poroso, red trabecular, rugosidad fractal, fascias y periostio.
 
 La misma semilla produce la misma anatomía a cualquier resolución. Así se
 puede comparar una modalidad con otra sobre el mismo "paciente".
@@ -99,6 +101,7 @@ Cada script guarda sus figuras en `outputs/`:
 | `examples/08_luz.py` | Luz de 450 a 1450 nm a través del antebrazo |
 | `examples/09_generar_dataset.py` | Dataset etiquetado para entrenar una red neuronal |
 | `examples/10_impedancia_eit.py` | EIT de una pierna a 50 kHz con 16 electrodos: potencial y densidad de corriente sana vs fracturada, cambio de tensiones de borde y reconstrucción de diferencias |
+| `examples/12_realismo.py` | Fantoma básico frente a realista (hueso poroso, trabéculas, fascias) en ecografía, TAC y RM, en adulto sano y anciano osteoporótico |
 | `examples/11_fracturas_internas_baja_frecuencia.py` | ¿Ve el ultrasonido de baja frecuencia (0.25-1 MHz) las fracturas internas que la ecografía no ve? Transmisión a través de la pierna y axial por la cortical, en cuerpo normal y obeso (`--procesos N` para paralelizar; ~30 min) |
 
 ### Resultado principal: ¿qué atraviesa un antebrazo de ~47 mm?
@@ -180,6 +183,37 @@ cuerpo obeso la onda guiada por la cortical (AT) deja de separarse de la
 onda directa a baja frecuencia. Límites: corte 2D (la tibia real es un tubo),
 hueso isótropo y sin porosidad, simulación sin ruido.
 
+### Modo realista: hueso poroso, trabéculas y fascias
+
+![Fantoma básico frente a realista](docs/img/12_realismo.png)
+
+`longitudinal_limb(..., realism="realista")` y `cross_section_limb(..., realism="realista")`
+añaden al fantoma de capas:
+
+- **porosidad cortical**: canales de Havers del 5 % en el adulto sano y ~18 %,
+  con cavidades y trabecularización endocortical, en `anciano_osteoporotico`;
+- una **red trabecular** explícita (BV/TV, grosor, orientación y perforación);
+- **rugosidad fina autoafín** (espectro en ley de potencia) en periostio,
+  endostio y fracturas;
+- **fascias, septos de la grasa, perimisio y periostio**.
+
+Lo que la malla resuelve se dibuja explícito; lo demás queda como fracción de
+poro por celda, con la misma densidad media. Cada física usa su regla de
+mezcla: lineal (densidad, rayos X, óptica y RM), Maxwell Garnett (dieléctrica)
+y Hashin-Shtrikman (elasticidad). Por defecto (`realism=None`) el fantoma es el
+de siempre; los datasets usan el modo realista.
+
+En `12_realismo.py`:
+- **ecografía**: las fascias dan ecos en la grasa (+17 dB) y la cortical porosa
+  cambia las reverberaciones limpias por un moteado difuso;
+- **TAC**: en el anciano la cortical baja ~300 HU y su desviación pasa de 165 a
+  694 HU;
+- **RM**: la cortical porosa del anciano se aclara en T1 (de 0.18 a 0.63 respecto
+  al músculo).
+
+Las propiedades de fascia y periostio son estimaciones. El hueso sigue siendo
+isótropo: la anisotropía elástica exige cambiar el solver.
+
 ### Impedancia eléctrica (baja frecuencia)
 
 A 50 kHz la corriente atraviesa la pierna sin problema, pero su resolución es
@@ -209,7 +243,7 @@ tests/          validación física (pytest)
 
 ## Validación
 
-`pytest` (138 tests, ~1 min con la CPU libre) compara cada solver con soluciones analíticas y comprueba los fantomas y los datasets:
+`pytest` (162 tests, ~1-2 min con la CPU libre) compara cada solver con soluciones analíticas y comprueba los fantomas y los datasets:
 
 - **Ultrasonido**: velocidad de las ondas P y S (< 1 %), coeficiente de
   reflexión en una interfaz (medido 0.539 frente a 0.538 teórico),
@@ -256,7 +290,9 @@ que no son dependencias del proyecto.
   rayos X útil en 2D es el TAC.
 - Rayos X sin radiación dispersa (scatter) ni líneas características del W.
 - Microondas en banda estrecha (propiedades a la frecuencia central).
-- Hueso isótropo (el real es anisótropo y poroso). Acústica lineal.
+- Hueso isótropo (el real es anisótropo). La porosidad sólo está en el modo
+  realista, y cerca de los bordes absorbentes se sustituye por su media
+  (los poros dentro de la CPML la volvían inestable). Acústica lineal.
 - Rendimiento: una ecografía de 3 MHz y 24×22 mm con 3 ángulos tarda ~1 min
   en una CPU con NumPy (Numba lo acelera ~1.6x con 1 hilo y ~3x con 4). A
   7-10 MHz la malla crece mucho (varios minutos o más).
@@ -265,5 +301,5 @@ que no son dependencias del proyecto.
 
 - 3D (necesita GPU: CuPy, JAX o Numba-CUDA).
 - Monte Carlo de fotones para la óptica, scatter en rayos X.
-- Hueso anisótropo y poroso, callo de consolidación, otras anatomías.
+- Hueso anisótropo (tensor elástico por celda en el solver), callo de consolidación, otras anatomías.
 - Entrenamiento de la red neuronal (PyTorch) sobre los datasets generados.
