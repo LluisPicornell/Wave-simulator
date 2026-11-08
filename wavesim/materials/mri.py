@@ -9,6 +9,10 @@ Fuentes (valores in vivo, aproximados):
   - Médula amarilla de la diáfisis ≈ grasa.
   - Edema y hematoma: valores representativos; en la realidad dependen mucho
     del tiempo de evolución (el hematoma cambia de señal en días).
+  - Fascia y periostio: estimación a partir del tendón y el ligamento, cuyo
+    agua ligada al colágeno tiene T2 de 1-10 ms (Du & Bydder 2013; Gold et
+    al. 2004): salen oscuros en todas las secuencias convencionales y se ven
+    en UTE.
 
 PD es la densidad protónica relativa al agua. Los tiempos están en ms a 1.5 T
 y 3 T; para otros campos se interpola en escala log-log.
@@ -55,4 +59,6 @@ MRI: dict[str, MRIProps] = {
     "marrow": MRIProps(0.9, (370.0, 400.0), (55.0, 60.0)),
     "hematoma": MRIProps(0.85, (1000.0, 1300.0), (100.0, 80.0)),
     "edema": MRIProps(0.95, (1000.0, 1300.0), (90.0, 80.0)),
+    "fascia": MRIProps(0.6, (700.0, 800.0), (12.0, 10.0), t2_prime_15=10.0),
+    "periosteum": MRIProps(0.6, (800.0, 900.0), (15.0, 12.0), t2_prime_15=10.0),
 }

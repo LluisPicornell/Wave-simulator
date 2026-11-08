@@ -61,10 +61,13 @@ class MaxwellTMSolver:
     def __init__(self, phantom: Phantom, f0: float, npml: int = 20, cfl: float = 0.95, dtype=np.float64):
         self.phantom, self.grid, self.f0 = phantom, phantom.grid, f0
         g = self.grid
-        props = {k: dielectric.permittivity_and_conductivity(k, f0) for k in phantom.present_tissues()}
-        self.eps_r = phantom.property_map(lambda k: props[k][0])
-        self.sigma = phantom.property_map(lambda k: props[k][1])
-        n_max = max(abs(np.sqrt(complex(dielectric.complex_permittivity(k, f0)))) for k in props)
+        # Permitividad compleja por celda: en las celdas porosas, Maxwell Garnett (materials.porous)
+        tissues = phantom.property_tissues()
+        eps_c = {k: complex(dielectric.complex_permittivity(k, f0)) for k in tissues}
+        eps_map = phantom.property_map(lambda k: eps_c[k], dtype=complex, physics="dielectric")
+        self.eps_r = eps_map.real.copy()
+        self.sigma = -eps_map.imag * 2.0 * np.pi * f0 * EPS0
+        n_max = max(abs(np.sqrt(eps_c[k])) for k in tissues)
         self.points_per_wavelength = C0 / (f0 * n_max * g.dx)
         if self.points_per_wavelength < 10:
             warnings.warn(f"Sólo {self.points_per_wavelength:.1f} puntos por longitud de onda en el tejido: "
@@ -162,7 +165,7 @@ class MaxwellTMSolver:
             if progress and n % max(nt // 10, 1) == 0:
                 print(f"  paso {n}/{nt}", flush=True)
         phasor = 2.0 * acc / max(n_acc, 1)
-        rho = self.phantom.property_map(lambda k: ACOUSTIC[k].density)
+        rho = self.phantom.property_map(lambda k: ACOUSTIC[k].density, physics="acoustic")
         sar = self.sigma * np.abs(phasor) ** 2 / (2.0 * rho)
         return EMResult(self.f0, phasor, self.eps_r, self.sigma, sar, self.dt, nt, time.time() - t0)
 
