@@ -4,7 +4,7 @@ Cada banda necesita una física distinta; este módulo elige la adecuada:
 
 | Banda                   | Frecuencia          | Modelo físico                                    | Solver de imagen          |
 |-------------------------|---------------------|--------------------------------------------------|---------------------------|
-| Baja frecuencia         | < 10 MHz            | cuasi-estático (λ ≫ cuerpo), Gabriel             | sólo atenuación analítica |
+| Baja frecuencia         | < 10 MHz            | cuasi-estático (λ ≫ cuerpo), Gabriel             | ``quasistatic`` (EIT)     |
 | Radiofrecuencia / micro | 10 MHz - 300 GHz    | onda completa, Maxwell, Gabriel                  | ``fdtd_tm``               |
 | Terahercios             | 0.3 - 10 THz        | absorción del agua (doble Debye / tablas)        | ``projection`` (balística)|
 | Infrarrojo / visible    | 10 THz - 790 THz    | transporte de luz: difusión o balística          | ``optics``                |
@@ -52,7 +52,7 @@ class Band:
 
 
 BANDS: tuple[Band, ...] = (
-    Band("Baja frecuencia (cuasi-estático)", 1.0, 1e7, "cuasi-estático", "analítico"),
+    Band("Baja frecuencia (cuasi-estático)", 1.0, 1e7, "cuasi-estático", "em.quasistatic"),
     Band("Radiofrecuencia", 1e7, 3e8, "onda completa (Maxwell)", "em.fdtd_tm"),
     Band("Microondas", 3e8, 3e11, "onda completa (Maxwell)", "em.fdtd_tm"),
     Band("Terahercios", 3e11, 1e13, "absorción del agua", "em.projection"),
