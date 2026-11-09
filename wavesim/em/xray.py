@@ -22,6 +22,7 @@ import numpy as np
 
 from ..materials import xray as xd
 from ..phantoms.phantom import Phantom
+from .fanbeam import FanGeometry, fan_fbp, fan_project, os_sart
 from .projection import detector_axis, fbp, project
 
 
@@ -171,23 +172,29 @@ class Projections:
     line_integrals: np.ndarray  # -ln(I/I0) medido (con ruido)
     intensity: np.ndarray  # I/I0
     spectrum: XraySpectrum
+    geometry: FanGeometry | None = None  # None = haz paralelo
 
 
 def acquire(phantom: Phantom, angles_deg, spectrum: XraySpectrum | None = None, photons: float | None = 1e5,
-            det_spacing: float | None = None, rng: np.random.Generator | None = None) -> Projections:
+            det_spacing: float | None = None, rng: np.random.Generator | None = None,
+            geometry: FanGeometry | None = None) -> Projections:
     """Adquiere proyecciones de rayos X del fantoma.
 
     ``photons``: fotones por elemento de detector y proyección sin objeto
-    (None = sin ruido). Valores típicos: 1e4-1e6.
+    (None = sin ruido). Valores típicos: 1e4-1e6. Con ``geometry`` (``FanGeometry``) el haz es en
+    abanico con fuente puntual; ``det`` son entonces las posiciones de los elementos del detector.
     """
     spectrum = spectrum or tube_spectrum()
     g = phantom.grid
-    det = detector_axis(g, det_spacing)
+    det = detector_axis(g, det_spacing) if geometry is None else geometry.u
     # Los coeficientes son lineales en mu: la mezcla lineal de la porosidad es exacta
     coef = {k: basis_coefficients(k, spectrum) for k in phantom.property_tissues()}
     maps = np.stack([phantom.property_map(lambda k: coef[k][0], physics="xray"),
                      phantom.property_map(lambda k: coef[k][1], physics="xray")])
-    lw, lb = project(maps, g, angles_deg, det)  # longitudes equivalentes de agua y hueso (m)
+    if geometry is None:
+        lw, lb = project(maps, g, angles_deg, det)  # longitudes equivalentes de agua y hueso (m)
+    else:
+        lw, lb = fan_project(maps, g, geometry, angles_deg)
     e = spectrum.energies_kev
     mu_w = xd.linear_attenuation("water", e)
     mu_b = xd.linear_attenuation("cortical_bone", e)
@@ -197,7 +204,7 @@ def acquire(phantom: Phantom, angles_deg, spectrum: XraySpectrum | None = None, 
         rng = rng or np.random.default_rng(0)
         counts = np.maximum(rng.poisson(intensity * photons), 1)
         intensity = counts / photons
-    return Projections(np.asarray(angles_deg, float), det, -np.log(intensity), intensity, spectrum)
+    return Projections(np.asarray(angles_deg, float), det, -np.log(intensity), intensity, spectrum, geometry)
 
 
 def radiograph(phantom: Phantom, angle_deg: float = 0.0, spectrum: XraySpectrum | None = None, **kw) -> Projections:
@@ -213,8 +220,13 @@ class CTImage:
 
 
 def ct_scan(phantom: Phantom, n_angles: int = 360, spectrum: XraySpectrum | None = None, photons: float | None = 1e5,
-            beam_hardening_correction: bool = True, rng: np.random.Generator | None = None) -> CTImage:
-    """TAC de haz paralelo sobre 180° y reconstrucción por FBP en la malla del fantoma.
+            beam_hardening_correction: bool = True, rng: np.random.Generator | None = None,
+            geometry: FanGeometry | None = None, method: str = "fbp", **recon_kw) -> CTImage:
+    """TAC y reconstrucción en la malla del fantoma. Por defecto haz paralelo sobre 180° y FBP.
+
+    Con ``geometry`` (``FanGeometry``) el haz es en abanico y ``n_angles`` vistas cubren 360°.
+    ``method="sart"`` reconstruye con ``fanbeam.os_sart`` (``recon_kw``: ``n_iter``, ``subset_size``,
+    ``tv_weight``...) y exige ``geometry``; sirve para pocos ángulos o ruido alto.
 
     Con ``beam_hardening_correction`` las proyecciones se linealizan para agua
     (como hace un escáner real): el agua y los tejidos blandos salen sin
@@ -222,8 +234,12 @@ def ct_scan(phantom: Phantom, n_angles: int = 360, spectrum: XraySpectrum | None
     entre huesos), igual que en la clínica.
     """
     spectrum = spectrum or tube_spectrum(120.0, 6.0)  # TAC clínico típico
-    angles = np.arange(n_angles) * 180.0 / n_angles
-    proj = acquire(phantom, angles, spectrum, photons, rng=rng)
+    if method not in ("fbp", "sart"):
+        raise ValueError(f"método desconocido '{method}' (use 'fbp' o 'sart')")
+    if method == "sart" and geometry is None:
+        raise ValueError("method='sart' requiere una geometría en abanico")
+    angles = np.arange(n_angles) * (180.0 if geometry is None else 360.0) / n_angles
+    proj = acquire(phantom, angles, spectrum, photons, rng=rng, geometry=geometry)
     e_ref = float(np.clip(spectrum.mean_energy, xd.ENERGIES_KEV[0], xd.ENERGIES_KEV[-1]))
     mu_ref = float(xd.linear_attenuation("water", e_ref))
     sino = proj.line_integrals
@@ -232,7 +248,12 @@ def ct_scan(phantom: Phantom, n_angles: int = 360, spectrum: XraySpectrum | None
         mu_w = mu_ref
     else:
         mu_w = effective_water_mu(spectrum, typical_path(proj)) if spectrum.energies_kev.size > 1 else mu_ref
-    mu = fbp(sino, angles, proj.det, phantom.grid)
+    if geometry is None:
+        mu = fbp(sino, angles, proj.det, phantom.grid)
+    elif method == "fbp":
+        mu = fan_fbp(sino, angles, geometry, phantom.grid)
+    else:
+        mu = os_sart(sino, angles, geometry, phantom.grid, **recon_kw)
     return CTImage(mu, xd.hounsfield(mu, mu_w, 0.0), proj)
 
 
