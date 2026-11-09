@@ -10,7 +10,9 @@ Malla de Yee de 2.º orden con bordes CPML. Cada tejido se describe por su
 permitividad ``eps'`` y conductividad efectiva ``sigma`` a la frecuencia de
 trabajo (modelo de Gabriel), es decir, una simulación de banda estrecha: se
 emite una onda continua y se extrae el fasor del campo en régimen
-estacionario con una DFT de un solo punto.
+estacionario con una DFT de un solo punto. Para un pulso de banda ancha con
+tejidos dispersivos (Debye multipolo) está ``em.fdtd_dispersive``, que
+comparte esta malla de Yee (``YeeTMGrid``).
 
 Rango práctico: ~10 MHz - 300 GHz. Por debajo, el número de pasos por periodo
 se dispara y la física es cuasi-estática; por encima, la longitud de onda en
@@ -57,34 +59,25 @@ def recommended_dx(f0: float, tissues: list[str], ppw: float = 15.0) -> float:
     return C0 / (f0 * n_max * ppw)
 
 
-class MaxwellTMSolver:
-    def __init__(self, phantom: Phantom, f0: float, npml: int = 20, cfl: float = 0.95, dtype=np.float64):
-        self.phantom, self.grid, self.f0 = phantom, phantom.grid, f0
+class YeeTMGrid:
+    """Malla de Yee 2D (modo TM) con bordes CPML, común a los solvers de banda estrecha y ancha.
+
+    Ey está en el centro de cada celda ``(j, i)``, Hx en ``(j + 1/2, i)`` y Hz
+    en ``(j, i + 1/2)``. Las subclases definen los coeficientes ``ca`` y
+    ``cb`` de la actualización de Ey (es decir, el material).
+    """
+
+    def _setup_yee(self, phantom: Phantom, npml: int, cfl: float, dtype, f_ref: float) -> None:
+        self.phantom, self.grid = phantom, phantom.grid
         g = self.grid
-        # Permitividad compleja por celda: en las celdas porosas, Maxwell Garnett (materials.porous)
-        tissues = phantom.property_tissues()
-        eps_c = {k: complex(dielectric.complex_permittivity(k, f0)) for k in tissues}
-        eps_map = phantom.property_map(lambda k: eps_c[k], dtype=complex, physics="dielectric")
-        self.eps_r = eps_map.real.copy()
-        self.sigma = -eps_map.imag * 2.0 * np.pi * f0 * EPS0
-        n_max = max(abs(np.sqrt(eps_c[k])) for k in tissues)
-        self.points_per_wavelength = C0 / (f0 * n_max * g.dx)
-        if self.points_per_wavelength < 10:
-            warnings.warn(f"Sólo {self.points_per_wavelength:.1f} puntos por longitud de onda en el tejido: "
-                          "reduce dx.", stacklevel=2)
         self.dt = cfl * g.dx / (C0 * np.sqrt(2.0))
-        dt = self.dt
-        eps = self.eps_r * EPS0
-        k = self.sigma * dt / (2 * eps)
-        self.ca = ((1 - k) / (1 + k)).astype(dtype)
-        self.cb = (dt / eps / (1 + k)).astype(dtype)
-        self.ch = dt / MU0
+        self.ch = self.dt / MU0
         shape = g.shape
         self.ey = np.zeros(shape, dtype)
         self.hx = np.zeros(shape, dtype)
         self.hz = np.zeros(shape, dtype)
         self.d = {name: np.zeros(shape, dtype) for name in ("ey_z", "ey_x", "hx_z", "hz_x")}
-        kw = dict(npml=npml, dx=g.dx, dt=dt, c_max=C0, f_ref=f0, dtype=dtype)
+        kw = dict(npml=npml, dx=g.dx, dt=self.dt, c_max=C0, f_ref=f_ref, dtype=dtype)
         self.pml = {
             "ey_z": CPMLDerivative(shape, 0, True, **kw),
             "ey_x": CPMLDerivative(shape, 1, True, **kw),
@@ -112,10 +105,7 @@ class MaxwellTMSolver:
         self._set_scale(e0)
 
     def _set_scale(self, e0: float) -> None:
-        # Lámina de corriente J_s: emite E = eta J_s / 2 a cada lado → J_s = 2 E0 / eta
-        eps = self.eps_r[self._src_j, self._src_i]
-        eta = ETA0 / np.sqrt(eps)
-        self._src_scale = self.cb[self._src_j, self._src_i] * 2.0 * e0 / (eta * self.grid.dx)
+        raise NotImplementedError
 
     def _deriv(self, name, f, axis, forward):
         out = self.d[name]
@@ -128,6 +118,56 @@ class MaxwellTMSolver:
         o *= self.inv_dx
         self.pml[name].apply(out)
         return out
+
+    def _curl_h(self) -> np.ndarray:
+        """Avanza H medio paso y devuelve ``dHx/dz - dHz/dx`` en los nodos de Ey."""
+        self.hx += self.ch * self._deriv("ey_z", self.ey, 0, True)
+        self.hz -= self.ch * self._deriv("ey_x", self.ey, 1, True)
+        return self._deriv("hx_z", self.hx, 0, False) - self._deriv("hz_x", self.hz, 1, False)
+
+
+class MaxwellTMSolver(YeeTMGrid):
+    """FDTD de banda estrecha: ``eps'`` y ``sigma`` de cada celda a la frecuencia ``f0``.
+
+    ``eps_map`` (opcional) sustituye la permitividad relativa compleja
+    ``eps' - j eps''`` por celda que se calcularía del fantoma (por ejemplo, la
+    promediada en las interfaces de ``em.subpixel``); el fantoma sigue dando
+    la malla y la densidad para el SAR.
+    """
+
+    def __init__(self, phantom: Phantom, f0: float, npml: int = 20, cfl: float = 0.95, dtype=np.float64,
+                 eps_map: np.ndarray | None = None):
+        self.f0 = f0
+        g = phantom.grid
+        # Permitividad compleja por celda: en las celdas porosas, Maxwell Garnett (materials.porous)
+        tissues = phantom.property_tissues()
+        eps_c = {k: complex(dielectric.complex_permittivity(k, f0)) for k in tissues}
+        if eps_map is None:
+            eps_map = phantom.property_map(lambda k: eps_c[k], dtype=complex, physics="dielectric")
+            n_max = max(abs(np.sqrt(eps_c[k])) for k in tissues)
+        else:
+            eps_map = np.asarray(eps_map, dtype=complex)
+            if eps_map.shape != g.shape:
+                raise ValueError(f"eps_map tiene forma {eps_map.shape}, la malla {g.shape}")
+            n_max = float(np.abs(np.sqrt(eps_map)).max())
+        self.eps_r = eps_map.real.copy()
+        self.sigma = -eps_map.imag * 2.0 * np.pi * f0 * EPS0
+        self.points_per_wavelength = C0 / (f0 * n_max * g.dx)
+        if self.points_per_wavelength < 10:
+            warnings.warn(f"Sólo {self.points_per_wavelength:.1f} puntos por longitud de onda en el tejido: "
+                          "reduce dx.", stacklevel=2)
+        self._setup_yee(phantom, npml, cfl, dtype, f_ref=f0)
+        dt = self.dt
+        eps = self.eps_r * EPS0
+        k = self.sigma * dt / (2 * eps)
+        self.ca = ((1 - k) / (1 + k)).astype(dtype)
+        self.cb = (dt / eps / (1 + k)).astype(dtype)
+
+    def _set_scale(self, e0: float) -> None:
+        # Lámina de corriente J_s: emite E = eta J_s / 2 a cada lado → J_s = 2 E0 / eta
+        eps = self.eps_r[self._src_j, self._src_i]
+        eta = ETA0 / np.sqrt(eps)
+        self._src_scale = self.cb[self._src_j, self._src_i] * 2.0 * e0 / (eta * self.grid.dx)
 
     def run(self, n_periods_steady: float = 4.0, settle_time: float | None = None, progress: bool = False) -> EMResult:
         """Emite una onda continua hasta el régimen estacionario y extrae el fasor a f0."""
@@ -153,9 +193,7 @@ class MaxwellTMSolver:
         n_acc = 0
         t0 = time.time()
         for n in range(nt):
-            self.hx += self.ch * self._deriv("ey_z", self.ey, 0, True)
-            self.hz -= self.ch * self._deriv("ey_x", self.ey, 1, True)
-            curl = self._deriv("hx_z", self.hx, 0, False) - self._deriv("hz_x", self.hz, 1, False)
+            curl = self._curl_h()
             self.ey *= self.ca
             self.ey += self.cb * curl
             self.ey[self._src_j, self._src_i] -= self._src_scale * drive[n]

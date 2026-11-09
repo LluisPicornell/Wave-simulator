@@ -60,6 +60,29 @@ def test_heterogeneous_bone_fracture_with_attenuation():
     _assert_close(out)
 
 
+def test_per_mechanism_weights_in_porous_bone():
+    """Tres mecanismos con pesos distintos por celda (poros de la cortical realista)."""
+    f0 = 2e6
+    ph = longitudinal_limb("tibia", Fracture(displacement=1e-3), width=8e-3, depth=14e-3, dx=1450 / f0 / 8,
+                           realism="realista")
+    out = _run_both(ph, f0, "pressure", 220, attenuation=True, n_mechanisms=3)
+    w = out["numpy"][0].dt_pi_t
+    assert w.shape[0] == 3 and not np.allclose(w[0], w[1])  # cada mecanismo con su peso
+    _assert_close(out)
+
+
+def test_anisotropic_bone_with_porosity():
+    """Cortical transversalmente isótropa con poros y fractura: mismo resultado y estable en ambos backends."""
+    f0 = 2e6
+    ph = longitudinal_limb("tibia", Fracture(displacement=1e-3), width=8e-3, depth=14e-3, dx=1450 / f0 / 8,
+                           realism="realista")
+    out = _run_both(ph, f0, "pressure", 220, attenuation=True, n_mechanisms=2, anisotropic_bone=True)
+    assert out["numpy"][0].anisotropic and out["numba"][0].anisotropic
+    _assert_close(out)
+    for backend in ("numba", "numpy"):
+        assert np.isfinite(out[backend][0].sxx).all()
+
+
 def test_force_source():
     f0 = 2e6
     ph = longitudinal_limb("tibia", Fracture(displacement=1e-3), width=8e-3, depth=14e-3, dx=1450 / f0 / 8)

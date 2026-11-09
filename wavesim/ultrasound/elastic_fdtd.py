@@ -9,6 +9,10 @@ Ecuaciones de la elastodinámica lineal en formulación velocidad-tensión
     dszz/dt = lambda dvx/dx + (lambda + 2mu) dvz/dz
     dsxz/dt = mu (dvx/dz + dvz/dx)
 
+En un medio transversalmente isótropo con los ejes de la malla (hueso
+cortical, opcional) ``lambda + 2mu`` y ``lambda`` pasan a ser C11, C33 y C13
+y ``mu`` es C55; el caso isótropo conserva su propio camino, más barato.
+
 - Derivadas espaciales de 4.º orden y salto temporal (leapfrog) de 2.º orden.
 - En los fluidos (tejidos blandos, agua) ``mu = 0``: sólo hay ondas de
   presión, ``sxx = szz = -p``. En el hueso aparecen ondas de cizalla y
@@ -39,7 +43,7 @@ import numpy as np
 from ..core.pml import CPMLDerivative
 from ..phantoms.phantom import Phantom
 from . import attenuation as att
-from .medium import ElasticMedium, elastic_medium
+from .medium import ElasticMedium, christoffel_speeds, elastic_medium
 
 C1, C2 = 9.0 / 8.0, -1.0 / 24.0
 
@@ -95,12 +99,16 @@ class ElasticSolver:
     Parámetros principales:
       - ``npml``: grosor de la capa absorbente (celdas).
       - ``n_mechanisms``: mecanismos de relajación para la atenuación (0 = sin
-        atenuación; 1 es suficiente para pulsos de banda moderada).
+        atenuación). Con 1 el error frente a la ley de potencia llega al
+        ~14 % en la banda del pulso; con 2, < 2 % en [0.5, 1.8]·f0; con 3,
+        < 2 % en [0.3, 2.5]·f0, para exponentes de 1 a 2 (ver ``attenuation``).
       - ``scattering``: escala de la heterogeneidad que produce speckle.
       - ``cfl``: fracción del paso temporal máximo estable.
       - ``backend``: "numpy" (referencia), "numba" (kernels fusionados y
         paralelos de ``_numba_kernels``; error si Numba no está instalado o si
         ``dtype`` no es float32) o "auto" (Numba si está disponible, si no NumPy).
+      - ``anisotropic_bone``: cortical transversalmente isótropa (ver
+        ``medium.elastic_medium``). Si se pasa ``medium``, manda el medio.
     """
 
     def __init__(
@@ -115,27 +123,45 @@ class ElasticSolver:
         medium: ElasticMedium | None = None,
         dtype=np.float32,
         backend: str = "auto",
+        anisotropic_bone: bool = False,
     ):
         self.backend = self._resolve_backend(backend, dtype)
         self.phantom = phantom
         self.grid = phantom.grid
         self.f0 = f0
         self.dtype = dtype
-        self.medium = medium or elastic_medium(phantom, f0, n_mechanisms, scattering, attenuation)
+        self.medium = medium or elastic_medium(phantom, f0, n_mechanisms, scattering, attenuation, anisotropic_bone)
         m = self.medium
         dx = self.grid.dx
         self.inv_dx = 1.0 / dx
         self.n_mech = m.tau_sigma.size
 
         # Módulos relajados corregidos por dispersión y no relajados
-        fp = att.relaxed_modulus_factor(m.tau_p, m.tau_sigma, f0) if self.n_mech else 1.0
-        fs = att.relaxed_modulus_factor(m.tau_s, m.tau_sigma, f0) if self.n_mech else 1.0
-        pi_r = m.rho * m.cp**2 * fp
-        mu_r = m.rho * m.cs**2 * fs
         L = self.n_mech
-        pi_u = pi_r * (1 + L * m.tau_p)
-        mu_u = mu_r * (1 + L * m.tau_s)
-        cp_u_max = float(np.sqrt(np.max(pi_u / m.rho)))
+        w_p, w_s = m.weights("p"), m.weights("s")
+        fp = att.relaxed_modulus_factor(w_p, m.tau_sigma, f0) if L else 1.0
+        fs = att.relaxed_modulus_factor(w_s, m.tau_sigma, f0) if L else 1.0
+        self.anisotropic = m.stiffness is not None
+        if self.anisotropic:
+            # La parte "P" (C11, C33 y C13 + 2 C55) relaja con los pesos de la onda P y C55
+            # con los de la S; en un medio isótropo son lambda + 2 mu y mu, como en el camino
+            # isótropo, y la memoria de C13 es la de lambda = (lambda + 2 mu) - 2 mu
+            a11, a33, a13, a55 = m.stiffness
+            p11, p33, p13 = (m.rho * a * fp for a in (a11, a33, a13 + 2 * a55))
+            mu_r = m.rho * a55 * fs
+        else:
+            pi_r = m.rho * m.cp**2 * fp
+            mu_r = m.rho * m.cs**2 * fs
+        relax_p = 1 + w_p.sum(axis=0)
+        mu_u = mu_r * (1 + w_s.sum(axis=0))
+        if self.anisotropic:
+            c11_u, c33_u = p11 * relax_p, p33 * relax_p
+            c13_u = p13 * relax_p - 2 * mu_u
+            v2 = _stability_modulus(c11_u, c33_u, c13_u, mu_u) / m.rho
+        else:
+            pi_u = pi_r * relax_p
+            v2 = pi_u / m.rho
+        cp_u_max = float(np.sqrt(np.max(v2)))
         self.dt = cfl * dx / (cp_u_max * np.sqrt(2.0) * (C1 + abs(C2)))
         dt = self.dt
 
@@ -145,17 +171,24 @@ class ElasticSolver:
             return np.ascontiguousarray(a, dtype=dtype)
 
         # Coeficientes ya multiplicados por dt
-        self.dt_pi = f(dt * pi_u)
         self.dt_mu2 = f(dt * 2 * mu_u)
-        self.dt_lam = f(dt * (pi_u - 2 * mu_u))
         self.dt_mu_xz = f(dt * _harmonic_xz(mu_u))
+        if self.anisotropic:
+            self.dt_c11, self.dt_c33, self.dt_c13 = f(dt * c11_u), f(dt * c33_u), f(dt * c13_u)
+        else:
+            self.dt_pi = f(dt * pi_u)
         self.dtbx = f(dt * 2.0 / (m.rho + _shift(m.rho, 1)))
         self.dtbz = f(dt * 2.0 / (m.rho + _shift(m.rho, 0)))
         self.has_shear = bool(np.any(mu_u > 0))
         if self.n_mech:
-            self.dt_pi_t = f(dt * pi_r * m.tau_p)
-            self.dt_mu2_t = f(dt * 2 * mu_r * m.tau_s)
-            self.dt_mu_t_xz = f(dt * _harmonic_xz(mu_r * m.tau_s))
+            # Un coeficiente por mecanismo, (L, nz, nx): cada uno con su peso
+            if self.anisotropic:
+                self.dt_c11_t, self.dt_c33_t = f(dt * p11 * w_p), f(dt * p33 * w_p)
+                self.dt_c13_t = f(dt * (p13 * w_p - 2 * mu_r * w_s))
+            else:
+                self.dt_pi_t = f(dt * pi_r * w_p)
+                self.dt_mu2_t = f(dt * 2 * mu_r * w_s)
+            self.dt_mu_t_xz = f(np.stack([dt * _harmonic_xz(mu_r * w) for w in w_s]))
             ts = m.tau_sigma
             self.mem_a = (1 - dt / (2 * ts)) / (1 + dt / (2 * ts))
             self.mem_b = (dt / ts) / (1 + dt / (2 * ts))
@@ -230,20 +263,32 @@ class ElasticSolver:
         self._nb_c1 = f32(C1 * self.inv_dx)
         self._nb_c2 = f32(C2 * self.inv_dx)
         self._nb_pml = {k: nk.pack_pml(v) for k, v in self.pml.items()}
+        # Marcadores de posición para los coeficientes que el kernel no lee
+        flat, stack = np.zeros((1, 1), self.dtype), np.zeros((1, 1, 1), self.dtype)
         if self.n_mech:
-            relax = (self.dt_pi_t, self.dt_mu2_t, self.dt_mu_t_xz)
             self._nb_mem = (np.asarray(self.mem_a, np.float64), np.asarray(self.mem_b, np.float64))
         else:
-            # Marcadores de posición: con n_mech = 0 el kernel no los lee
-            relax = (np.zeros((1, 1), self.dtype),) * 3
             self._nb_mem = (np.zeros(0), np.zeros(0))
-        self._nb_relax = relax
+        xz_t = self.dt_mu_t_xz if self.n_mech else stack
+        if self.anisotropic:
+            self._nb_iso = (flat, self.dt_mu2, self.dt_mu_xz, stack, stack, xz_t)
+            relax = (self.dt_c11_t, self.dt_c33_t, self.dt_c13_t) if self.n_mech else (stack,) * 3
+            self._nb_aniso = (True, self.dt_c11, self.dt_c33, self.dt_c13, *relax)
+        else:
+            relax = (self.dt_pi_t, self.dt_mu2_t) if self.n_mech else (stack,) * 2
+            self._nb_iso = (self.dt_pi, self.dt_mu2, self.dt_mu_xz, *relax, xz_t)
+            self._nb_aniso = (False, flat, flat, flat, stack, stack, stack)
 
     # ------------------------------------------------------------------
     def _check_sampling(self, dx: float) -> None:
         m = self.medium
-        speeds = np.concatenate([m.cp.ravel(), m.cs[m.cs > 0].ravel()])
-        c_min = float(speeds.min())
+        speeds = [m.cp.ravel(), m.cs[m.cs > 0].ravel()]
+        if m.stiffness is not None:
+            # En un medio anisótropo la onda más lenta puede ir en diagonal
+            solid = m.stiffness[3] > 0
+            for theta in np.linspace(0.0, np.pi / 2, 7):
+                speeds += list(christoffel_speeds(m.stiffness[:, solid], theta))
+        c_min = float(np.concatenate(speeds).min())
         ppw = c_min / (self.f0 * dx)
         self.points_per_wavelength = ppw
         if ppw < 6:
@@ -316,9 +361,9 @@ class ElasticSolver:
             t, vals = self._slip_delta(name, f)
             sxz[t] += self.dt_mu_xz.reshape(-1)[t] * vals
             if self.n_mech:
-                # misma corrección en las memorias (Crank-Nicolson, ver ``_memory``)
-                forcing = self.dt_mu_t_xz.reshape(-1)[t] * vals
+                # misma corrección en las memorias (Crank-Nicolson, ver ``_memory``), con el peso de cada mecanismo
                 for m in range(self.n_mech):
+                    forcing = self.dt_mu_t_xz[m].reshape(-1)[t] * vals
                     sxz[t] -= (0.5 * self.mem_b[m]) * forcing
                     self.rxz[m].reshape(-1)[t] -= self.mem_b[m] * forcing
 
@@ -355,9 +400,9 @@ class ElasticSolver:
         nk.stress_kernel(
             self.vx, self.vz, self.sxx, self.szz, self.sxz,
             self._mem["rxx"], self._mem["rzz"], self._mem["rxz"],
-            self.dt_pi, self.dt_mu2, self.dt_mu_xz, *self._nb_relax, *self._nb_mem,
+            *self._nb_iso, *self._nb_mem,
             self.has_shear, self._nb_c1, self._nb_c2,
-            pml["exx"], pml["ezz"], pml["exz_a"], pml["exz_b"],
+            pml["exx"], pml["ezz"], pml["exz_a"], pml["exz_b"], *self._nb_aniso,
         )  # fmt: skip
         if self._slip:
             self._slip_correct_numba("stress")
@@ -391,39 +436,56 @@ class ElasticSolver:
 
         # --- tensiones (parte no relajada)
         div, a1, a2 = self.div, self.acc2, self.acc3
-        np.add(exx, ezz, out=div)
-        np.multiply(self.dt_pi, div, out=a1)
-        np.multiply(self.dt_mu2, ezz, out=a2)
-        self.sxx += a1
-        self.sxx -= a2
-        np.multiply(self.dt_mu2, exx, out=a2)
-        self.szz += a1
-        self.szz -= a2
+        if self.anisotropic:
+            np.multiply(self.dt_c11, exx, out=a1)
+            self.sxx += a1
+            np.multiply(self.dt_c13, ezz, out=a1)
+            self.sxx += a1
+            np.multiply(self.dt_c13, exx, out=a1)
+            self.szz += a1
+            np.multiply(self.dt_c33, ezz, out=a1)
+            self.szz += a1
+        else:
+            np.add(exx, ezz, out=div)
+            np.multiply(self.dt_pi, div, out=a1)
+            np.multiply(self.dt_mu2, ezz, out=a2)
+            self.sxx += a1
+            self.sxx -= a2
+            np.multiply(self.dt_mu2, exx, out=a2)
+            self.szz += a1
+            self.szz -= a2
         if self.has_shear:
             np.multiply(self.dt_mu_xz, exz, out=a2)
             self.sxz += a2
 
-        # --- memorias viscoelásticas
+        # --- memorias viscoelásticas (cada mecanismo con su propio peso)
         if self.n_mech:
             f_xx, f_zz = acc, a1
-            np.multiply(self.dt_pi_t, div, out=a2)  # parte volumétrica común
-            np.multiply(self.dt_mu2_t, ezz, out=f_xx)
-            np.subtract(a2, f_xx, out=f_xx)
-            np.multiply(self.dt_mu2_t, exx, out=f_zz)
-            np.subtract(a2, f_zz, out=f_zz)
-            for l in range(self.n_mech):
-                self._memory(self.sxx, self.rxx[l], f_xx, l, a2)
-                self._memory(self.szz, self.rzz[l], f_zz, l, a2)
-            if self.has_shear:
-                np.multiply(self.dt_mu_t_xz, exz, out=f_xx)
-                for l in range(self.n_mech):
-                    self._memory(self.sxz, self.rxz[l], f_xx, l, a2)
+            for m in range(self.n_mech):
+                if self.anisotropic:
+                    np.multiply(self.dt_c11_t[m], exx, out=f_xx)
+                    np.multiply(self.dt_c13_t[m], ezz, out=a2)
+                    f_xx += a2
+                    np.multiply(self.dt_c13_t[m], exx, out=f_zz)
+                    np.multiply(self.dt_c33_t[m], ezz, out=a2)
+                    f_zz += a2
+                else:
+                    np.multiply(self.dt_pi_t[m], div, out=a2)  # parte volumétrica común
+                    np.multiply(self.dt_mu2_t[m], ezz, out=f_xx)
+                    np.subtract(a2, f_xx, out=f_xx)
+                    np.multiply(self.dt_mu2_t[m], exx, out=f_zz)
+                    np.subtract(a2, f_zz, out=f_zz)
+                self._memory(self.sxx, self.rxx[m], f_xx, m, a2)
+                self._memory(self.szz, self.rzz[m], f_zz, m, a2)
+                if self.has_shear:
+                    np.multiply(self.dt_mu_t_xz[m], exz, out=f_xx)
+                    self._memory(self.sxz, self.rxz[m], f_xx, m, a2)
 
         self._apply_pressure_sources(n)
 
-    def _memory(self, stress, r, forcing, l, tmp):
+    def _memory(self, stress, r, forcing, mech, tmp):
         """sigma += (r_new + r_old)/2 ;  r_new = A r_old - B F  (Crank-Nicolson)."""
-        a, b = self.mem_a[l], self.mem_b[l]
+        a, b = self.mem_a[mech], self.mem_b[mech]
         np.multiply(r, 0.5 * (1 + a), out=tmp)
         stress += tmp
         np.multiply(forcing, 0.5 * b, out=tmp)
@@ -508,6 +570,19 @@ def _shift(a: np.ndarray, axis: int) -> np.ndarray:
         out[:-1, :] = a[1:, :]
         out[-1, :] = a[-1, :]
     return out
+
+
+def _stability_modulus(c11, c33, c13, c55):
+    """Mayor autovalor del operador elástico discreto (en unidades de módulo) para el límite de estabilidad.
+
+    El peor número de onda del esquema escalonado es el de Nyquist en las dos
+    direcciones; allí la matriz es ``[[C11 + C55, C13 + C55], [C13 + C55,
+    C33 + C55]]`` y su mayor autovalor, dividido por 2, es ``lambda + 2 mu``
+    en un medio isótropo (el ``cp`` de la condición de siempre).
+    """
+    half = 0.5 * (c11 + c33) + c55
+    root = np.sqrt(0.25 * (c11 - c33) ** 2 + (c13 + c55) ** 2)
+    return 0.5 * (half + root)
 
 
 def _harmonic_xz(mu: np.ndarray) -> np.ndarray:
