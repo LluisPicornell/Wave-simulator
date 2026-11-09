@@ -10,7 +10,9 @@ Malla de Yee de 2.º orden con bordes CPML. Cada tejido se describe por su
 permitividad ``eps'`` y conductividad efectiva ``sigma`` a la frecuencia de
 trabajo (modelo de Gabriel), es decir, una simulación de banda estrecha: se
 emite una onda continua y se extrae el fasor del campo en régimen
-estacionario con una DFT de un solo punto.
+estacionario con una DFT de un solo punto. Para un pulso de banda ancha con
+tejidos dispersivos (Debye multipolo) está ``em.fdtd_dispersive``, que
+comparte esta malla de Yee (``YeeTMGrid``).
 
 Rango práctico: ~10 MHz - 300 GHz. Por debajo, el número de pasos por periodo
 se dispara y la física es cuasi-estática; por encima, la longitud de onda en
