@@ -6,8 +6,8 @@
 - Endurecimiento del haz: el espectro pierde fotones de baja energía al
   atravesar el cuerpo; produce el artefacto de "cupping" en el TAC.
 - Ruido cuántico de Poisson según el número de fotones por detector.
-- No se simula la radiación dispersa (scatter), que en la realidad reduce el
-  contraste.
+- La radiación dispersa (scatter), que en la realidad reduce el contraste, se simula
+  como opción con un Monte Carlo de fotones (``xray_scatter``).
 
 Para que sea rápido, cada tejido se descompone en base agua + hueso
 (``mu_t(E) ≈ a_t mu_agua(E) + b_t mu_hueso(E)``): bastan dos proyecciones
@@ -24,6 +24,7 @@ from ..materials import xray as xd
 from ..phantoms.phantom import Phantom
 from .fanbeam import FanGeometry, fan_fbp, fan_project, os_sart
 from .projection import detector_axis, fbp, project
+from .xray_scatter import ScatterOptions, scatter_sinogram
 
 
 @dataclass
@@ -173,16 +174,20 @@ class Projections:
     intensity: np.ndarray  # I/I0
     spectrum: XraySpectrum
     geometry: FanGeometry | None = None  # None = haz paralelo
+    primary: np.ndarray | None = None  # I/I0 del haz primario (sin ruido); None si no se pidió scatter
+    scatter: np.ndarray | None = None  # I/I0 de la radiación dispersa (sin ruido)
 
 
 def acquire(phantom: Phantom, angles_deg, spectrum: XraySpectrum | None = None, photons: float | None = 1e5,
             det_spacing: float | None = None, rng: np.random.Generator | None = None,
-            geometry: FanGeometry | None = None) -> Projections:
+            geometry: FanGeometry | None = None, scatter: ScatterOptions | None = None) -> Projections:
     """Adquiere proyecciones de rayos X del fantoma.
 
     ``photons``: fotones por elemento de detector y proyección sin objeto
     (None = sin ruido). Valores típicos: 1e4-1e6. Con ``geometry`` (``FanGeometry``) el haz es en
     abanico con fuente puntual; ``det`` son entonces las posiciones de los elementos del detector.
+    Con ``scatter`` (``ScatterOptions``) se suma la radiación dispersa calculada por Monte Carlo
+    (``xray_scatter``) a la intensidad primaria antes del ruido de Poisson.
     """
     spectrum = spectrum or tube_spectrum()
     g = phantom.grid
@@ -200,11 +205,17 @@ def acquire(phantom: Phantom, angles_deg, spectrum: XraySpectrum | None = None, 
     mu_b = xd.linear_attenuation("cortical_bone", e)
     expo = np.exp(-(lw[..., None] * mu_w + lb[..., None] * mu_b))
     intensity = np.sum(spectrum.weights * expo, axis=-1)
+    primary = scattered = None
+    if scatter is not None:
+        primary = intensity
+        scattered, _ = scatter_sinogram(phantom, angles_deg, spectrum, geometry, None if geometry else det, scatter)
+        intensity = primary + scattered
     if photons is not None:
         rng = rng or np.random.default_rng(0)
         counts = np.maximum(rng.poisson(intensity * photons), 1)
         intensity = counts / photons
-    return Projections(np.asarray(angles_deg, float), det, -np.log(intensity), intensity, spectrum, geometry)
+    return Projections(np.asarray(angles_deg, float), det, -np.log(intensity), intensity, spectrum, geometry,
+                       primary, scattered)
 
 
 def radiograph(phantom: Phantom, angle_deg: float = 0.0, spectrum: XraySpectrum | None = None, **kw) -> Projections:
@@ -221,12 +232,15 @@ class CTImage:
 
 def ct_scan(phantom: Phantom, n_angles: int = 360, spectrum: XraySpectrum | None = None, photons: float | None = 1e5,
             beam_hardening_correction: bool = True, rng: np.random.Generator | None = None,
-            geometry: FanGeometry | None = None, method: str = "fbp", **recon_kw) -> CTImage:
+            geometry: FanGeometry | None = None, method: str = "fbp", scatter: ScatterOptions | None = None,
+            **recon_kw) -> CTImage:
     """TAC y reconstrucción en la malla del fantoma. Por defecto haz paralelo sobre 180° y FBP.
 
     Con ``geometry`` (``FanGeometry``) el haz es en abanico y ``n_angles`` vistas cubren 360°.
     ``method="sart"`` reconstruye con ``fanbeam.os_sart`` (``recon_kw``: ``n_iter``, ``subset_size``,
-    ``tv_weight``...) y exige ``geometry``; sirve para pocos ángulos o ruido alto.
+    ``tv_weight``...) y exige ``geometry``; sirve para pocos ángulos o ruido alto. ``scatter``
+    (``ScatterOptions``) añade la radiación dispersa sin corregirla: baja el contraste y produce
+    *cupping*.
 
     Con ``beam_hardening_correction`` las proyecciones se linealizan para agua
     (como hace un escáner real): el agua y los tejidos blandos salen sin
@@ -239,7 +253,7 @@ def ct_scan(phantom: Phantom, n_angles: int = 360, spectrum: XraySpectrum | None
     if method == "sart" and geometry is None:
         raise ValueError("method='sart' requiere una geometría en abanico")
     angles = np.arange(n_angles) * (180.0 if geometry is None else 360.0) / n_angles
-    proj = acquire(phantom, angles, spectrum, photons, rng=rng, geometry=geometry)
+    proj = acquire(phantom, angles, spectrum, photons, rng=rng, geometry=geometry, scatter=scatter)
     e_ref = float(np.clip(spectrum.mean_energy, xd.ENERGIES_KEV[0], xd.ENERGIES_KEV[-1]))
     mu_ref = float(xd.linear_attenuation("water", e_ref))
     sino = proj.line_integrals
