@@ -1,6 +1,8 @@
 """Ondas electromagnéticas en todo el espectro: Maxwell FDTD, óptica, rayos X/gamma."""
 
-from . import spectrum, xray, optics, montecarlo, projection, quasistatic, fanbeam, xray_phantoms, xray_scatter
+from . import (
+    spectrum, xray, optics, montecarlo, projection, quasistatic, fanbeam, xray_phantoms, xray_scatter, xray_detector,
+)
 from .fdtd_tm import EMResult, MaxwellTMSolver, recommended_dx, simulate_em_plane_wave
 from .quasistatic import (
     EITResult, Electrodes, QuasiStaticSolver, Sensitivity, adjacent_protocol, reconstruct_difference,
@@ -8,8 +10,8 @@ from .quasistatic import (
 )
 
 __all__ = [
-    "spectrum", "xray", "optics", "montecarlo", "projection", "quasistatic", "fanbeam", "xray_phantoms", "xray_scatter", "EMResult",
-    "MaxwellTMSolver",
+    "spectrum", "xray", "optics", "montecarlo", "projection", "quasistatic", "fanbeam", "xray_phantoms", "xray_scatter",
+    "xray_detector", "EMResult", "MaxwellTMSolver",
     "recommended_dx",
     "simulate_em_plane_wave", "EITResult", "Electrodes", "QuasiStaticSolver", "Sensitivity", "adjacent_protocol",
     "reconstruct_difference", "ring_electrodes", "sensitivity_matrix", "simulate_eit", "surface_electrodes",
