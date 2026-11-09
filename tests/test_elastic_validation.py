@@ -4,7 +4,9 @@ Los casos completos (U3, U4, U5 de ``docs/comparativa_simuladores.md`` §11.1) e
 ``benchmarks/elastic_validation.py`` y sus resultados en ``docs/validacion/elastico.md``.
 """
 
+import importlib.util
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -18,6 +20,12 @@ from wavesim.ultrasound import analytic as an
 F0 = 1e6
 WATER = (1000.0, 1500.0, 0.0)
 BONE = (1908.0, 3500.0, 1800.0)
+
+# Los montajes de medida son los del benchmark (con parámetros reducidos), para no duplicarlos
+_spec = importlib.util.spec_from_file_location(
+    "elastic_validation", Path(__file__).resolve().parents[1] / "benchmarks" / "elastic_validation.py")
+ev = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(ev)
 
 
 def _solver(rho, cp, cs, dx, cfl=0.9, backend="auto", dtype=np.float32, npml=20):
@@ -145,3 +153,39 @@ def test_correccion_de_interfaz_conserva_la_energia():
         b = np.sum(v * s._deriv(momentum, sxz, axis, not fwd))
         assert abs(a + b) < 1e-12 * abs(a)
     assert {"exz_a", "exz_b", "sxz_z", "sxz_x"} <= set(s._slip)
+
+
+# ----------------------------------------------------------------------------
+# U3: convergencia
+# ----------------------------------------------------------------------------
+def test_onda_plana_sigue_la_dispersion_del_esquema_y_converge_a_segundo_orden():
+    rows = [ev.plane_wave_1d(ev.WATER, "pressure", p) for p in (8, 16, 32)]
+    for r in rows:
+        # la velocidad medida es la que predice la relación de dispersión discreta (no hay error de implementación)
+        assert r["err"] == pytest.approx(r["pred"], abs=2e-6)
+        assert r["amp"] == pytest.approx(1.0, abs=1e-4)  # leapfrog sin pérdidas
+    # con CFL fija domina el término temporal, de 2.º orden (asintóticamente)
+    assert ev.slopes([r["dx"] for r in rows[1:]], [r["err"] for r in rows[1:]])[0] > 1.85
+    assert ev.slopes([r["dx"] for r in rows[1:]], [r["l2"] for r in rows[1:]])[0] > 1.8
+    assert abs(rows[-1]["err"]) < 6e-4
+
+
+def test_error_espacial_es_de_cuarto_orden_con_dt_fijo():
+    dt = ev.plane_wave_1d(ev.WATER, "pressure", 12, cfl=0.1)["dt"]
+    rows = [ev.plane_wave_1d(ev.WATER, "pressure", p, dt=dt) for p in (5, 8)]
+    assert ev.slopes([r["dx"] for r in rows], [r["err"] for r in rows])[0] > 3.6
+
+
+def test_onda_s_en_cortical_sigue_la_dispersion_del_esquema():
+    r = ev.plane_wave_1d(ev.BONE, "force_x", 12)
+    assert r["err"] == pytest.approx(r["pred"], abs=2e-6) and abs(r["err"]) < 1e-3
+
+
+def test_reflexion_normal_agua_cortical_converge_a_segundo_orden():
+    rows = [ev.layers_1d(ev.WATER, ev.BONE, p) for p in (8, 16)]
+    dxs = [r["dx"] for r in rows]
+    assert ev.slopes(dxs, [r["eR"] for r in rows])[0] > 1.8
+    assert ev.slopes(dxs, [r["eT"] for r in rows])[0] > 1.8
+    assert abs(rows[-1]["eR"]) < 3e-3 and abs(rows[-1]["eT"]) < 3e-3
+    # la interfaz efectiva está en la fila de nodos vz (media celda entre las filas de tensión)
+    assert abs(rows[-1]["delta"]) < 0.01
