@@ -231,7 +231,7 @@ def fit_errors(medium: DebyeMedium, eps_target: np.ndarray, f: np.ndarray) -> tu
     eps_m, sig_m = _target_parts(model, f)
     err_e = float(np.max(np.abs(eps_m / eps_t - 1.0)))
     lossy = sig_t > 0
-    err_s = float(np.max(np.abs(sig_m[lossy] / sig_t[lossy] - 1.0))) if lossy.any() else float(np.max(sig_m))
+    err_s = float(np.max(np.abs(sig_m[lossy] / sig_t[lossy] - 1.0))) if lossy.any() else float(np.max(np.abs(sig_m)))
     return err_e, err_s
 
 
