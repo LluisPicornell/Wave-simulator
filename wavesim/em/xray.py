@@ -24,6 +24,7 @@ from ..materials import xray as xd
 from ..phantoms.phantom import Phantom
 from .fanbeam import FanGeometry, fan_fbp, fan_project, os_sart
 from .projection import detector_axis, fbp, project
+from .xray_detector import DetectorModel, blur_signal, detect_counts
 from .xray_scatter import ScatterOptions, scatter_sinogram
 
 
@@ -180,14 +181,17 @@ class Projections:
 
 def acquire(phantom: Phantom, angles_deg, spectrum: XraySpectrum | None = None, photons: float | None = 1e5,
             det_spacing: float | None = None, rng: np.random.Generator | None = None,
-            geometry: FanGeometry | None = None, scatter: ScatterOptions | None = None) -> Projections:
+            geometry: FanGeometry | None = None, scatter: ScatterOptions | None = None,
+            detector: DetectorModel | None = None) -> Projections:
     """Adquiere proyecciones de rayos X del fantoma.
 
     ``photons``: fotones por elemento de detector y proyección sin objeto
     (None = sin ruido). Valores típicos: 1e4-1e6. Con ``geometry`` (``FanGeometry``) el haz es en
     abanico con fuente puntual; ``det`` son entonces las posiciones de los elementos del detector.
     Con ``scatter`` (``ScatterOptions``) se suma la radiación dispersa calculada por Monte Carlo
-    (``xray_scatter``) a la intensidad primaria antes del ruido de Poisson.
+    (``xray_scatter``) a la intensidad primaria antes del ruido de Poisson. Con ``detector``
+    (``DetectorModel``) se aplica el desenfoque del detector a la señal esperada y se añade su ruido
+    electrónico.
     """
     spectrum = spectrum or tube_spectrum()
     g = phantom.grid
@@ -210,10 +214,16 @@ def acquire(phantom: Phantom, angles_deg, spectrum: XraySpectrum | None = None, 
         primary = intensity
         scattered, _ = scatter_sinogram(phantom, angles_deg, spectrum, geometry, None if geometry else det, scatter)
         intensity = primary + scattered
+    spacing = float(det[1] - det[0])
     if photons is not None:
         rng = rng or np.random.default_rng(0)
-        counts = np.maximum(rng.poisson(intensity * photons), 1)
+        if detector is None:
+            counts = np.maximum(rng.poisson(intensity * photons), 1)
+        else:
+            counts = detect_counts(intensity * photons, spacing, detector, rng)
         intensity = counts / photons
+    elif detector is not None:
+        intensity = blur_signal(intensity, spacing, detector)
     return Projections(np.asarray(angles_deg, float), det, -np.log(intensity), intensity, spectrum, geometry,
                        primary, scattered)
 
@@ -233,14 +243,14 @@ class CTImage:
 def ct_scan(phantom: Phantom, n_angles: int = 360, spectrum: XraySpectrum | None = None, photons: float | None = 1e5,
             beam_hardening_correction: bool = True, rng: np.random.Generator | None = None,
             geometry: FanGeometry | None = None, method: str = "fbp", scatter: ScatterOptions | None = None,
-            **recon_kw) -> CTImage:
+            detector: DetectorModel | None = None, **recon_kw) -> CTImage:
     """TAC y reconstrucción en la malla del fantoma. Por defecto haz paralelo sobre 180° y FBP.
 
     Con ``geometry`` (``FanGeometry``) el haz es en abanico y ``n_angles`` vistas cubren 360°.
     ``method="sart"`` reconstruye con ``fanbeam.os_sart`` (``recon_kw``: ``n_iter``, ``subset_size``,
     ``tv_weight``...) y exige ``geometry``; sirve para pocos ángulos o ruido alto. ``scatter``
     (``ScatterOptions``) añade la radiación dispersa sin corregirla: baja el contraste y produce
-    *cupping*.
+    *cupping*. ``detector`` (``DetectorModel``) añade desenfoque y ruido electrónico.
 
     Con ``beam_hardening_correction`` las proyecciones se linealizan para agua
     (como hace un escáner real): el agua y los tejidos blandos salen sin
@@ -253,7 +263,8 @@ def ct_scan(phantom: Phantom, n_angles: int = 360, spectrum: XraySpectrum | None
     if method == "sart" and geometry is None:
         raise ValueError("method='sart' requiere una geometría en abanico")
     angles = np.arange(n_angles) * (180.0 if geometry is None else 360.0) / n_angles
-    proj = acquire(phantom, angles, spectrum, photons, rng=rng, geometry=geometry, scatter=scatter)
+    proj = acquire(phantom, angles, spectrum, photons, rng=rng, geometry=geometry, scatter=scatter,
+                   detector=detector)
     e_ref = float(np.clip(spectrum.mean_energy, xd.ENERGIES_KEV[0], xd.ENERGIES_KEV[-1]))
     mu_ref = float(xd.linear_attenuation("water", e_ref))
     sino = proj.line_integrals
