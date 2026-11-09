@@ -1,7 +1,8 @@
 """Rayos X y gamma: radiografía (proyección) y TAC (retroproyección filtrada).
 
 - Haz monoenergético o polienergético (tubo de wolframio, espectro de Kramers
-  filtrado por aluminio; se omiten las líneas características K del W).
+  filtrado por aluminio y, opcionalmente, con líneas características K del W,
+  filtración de cobre y autoabsorción en el ánodo según su ángulo).
 - Endurecimiento del haz: el espectro pierde fotones de baja energía al
   atravesar el cuerpo; produce el artefacto de "cupping" en el TAC.
 - Ruido cuántico de Poisson según el número de fotones por detector.
@@ -38,12 +39,116 @@ def monoenergetic(energy_kev: float) -> XraySpectrum:
     return XraySpectrum(np.array([float(energy_kev)]), np.array([1.0]))
 
 
-def tube_spectrum(kvp: float = 80.0, al_filter_mm: float = 2.5, bin_kev: float = 1.0) -> XraySpectrum:
-    """Espectro aproximado de un tubo de W (ley de Kramers) filtrado por aluminio."""
+# Líneas K del wolframio: energía (keV) e intensidad relativa a Kα1. Energías e intensidades
+# recordadas de la tabla de líneas de rayos X de Lawrence Berkeley (X-Ray Data Booklet);
+# NO verificadas en esta sesión (sin acceso a la fuente).
+W_K_EDGE_KEV = 69.525
+W_K_LINES = ((59.318, 1.00), (57.982, 0.58), (67.245, 0.22), (69.067, 0.08))
+# Fotones de las líneas K por electrón: proporcionales a (U-1)^1.67 con U = kVp / borde K
+# (exponente de Green & Cosslett para la ionización de la capa K), no a la intensidad del
+# continuo. La constante está anclada a que valgan el 4 % de los fotones del continuo a
+# 100 kVp: calibración heurística, no un ajuste a datos publicados.
+_K_YIELD_FRAC_100, _K_YIELD_P = 0.04, 1.67
+_W_CM3 = 19.3
+# Profundidad media de creación de los fotones: fracción del alcance de Kanaya-Okayama. Ajustada
+# (junto con la fracción de líneas K) para que la HVL concuerde con SpekPy 2.5.4 en 6 casos
+# (50-120 kVp, 12°, 2.5 y 4 mm Al; ver docs/validacion/rayos_x.md); no es un valor medido.
+_DEPTH_FRACTION = 0.27
+
+
+def _kanaya_okayama_um(e_kev):
+    """Alcance de electrones en W (µm), fórmula de Kanaya-Okayama (A=183.84, Z=74)."""
+    return 0.0276 * 183.84 * np.asarray(e_kev, float) ** 1.67 / (74.0**0.889 * _W_CM3)
+
+
+def anode_self_attenuation(e_kev: np.ndarray, kvp: float, anode_angle_deg: float,
+                           takeoff_offset_deg: float = 0.0) -> np.ndarray:
+    """Transmisión de los fotones a través del propio ánodo de W (autofiltración).
+
+    Los fotones de energía E se crean a profundidad uniforme entre 0 y una fracción del alcance
+    que pierde el electrón al bajar de ``kvp`` a E (modelo simple, con la fracción ajustada a SpekPy); salen con el
+    ángulo de despegue ``anode_angle_deg - takeoff_offset_deg``: ``takeoff_offset_deg > 0`` es el
+    lado del ánodo (rayos más rasantes: efecto talón) y ``< 0`` el del cátodo.
+    """
+    take = np.radians(anode_angle_deg - takeoff_offset_deg)
+    if take <= 0:
+        raise ValueError("El ángulo de despegue debe ser positivo")
+    depth_m = _DEPTH_FRACTION * 1e-6 * (_kanaya_okayama_um(kvp) - _kanaya_okayama_um(e_kev))
+    x = xd.filter_attenuation("tungsten", e_kev) * np.maximum(depth_m, 1e-12) / np.sin(take)
+    return (1.0 - np.exp(-x)) / x
+
+
+def tube_spectrum(kvp: float = 80.0, al_filter_mm: float = 2.5, bin_kev: float = 1.0, *, cu_filter_mm: float = 0.0,
+                  characteristic: bool = False, anode_angle_deg: float | None = None,
+                  takeoff_offset_deg: float = 0.0) -> XraySpectrum:
+    """Espectro aproximado de un tubo de W (ley de Kramers) filtrado por aluminio (y cobre).
+
+    Con los valores por defecto es el espectro de siempre. Opciones:
+
+    - ``cu_filter_mm``: filtración adicional de cobre.
+    - ``characteristic``: añade las líneas Kα1, Kα2, Kβ1 y Kβ2 del W si ``kvp`` supera el borde K
+      (69.525 keV); sus energías son líneas aparte, no se reparten en el histograma.
+    - ``anode_angle_deg``: autoabsorción en el ánodo (ver ``anode_self_attenuation``); con
+      ``takeoff_offset_deg`` se modela el efecto talón fuera del eje.
+    """
     e = np.arange(10.0 + bin_kev / 2, kvp, bin_kev)
     phi = (kvp - e) / e
-    phi *= np.exp(-xd.linear_attenuation("aluminum", e) * al_filter_mm * 1e-3)
-    return XraySpectrum(e, phi / phi.sum())
+    energies = e
+    if characteristic and kvp > W_K_EDGE_KEV:
+        line_e = np.array([le for le, _ in W_K_LINES])
+        rel = np.array([r for _, r in W_K_LINES])
+        e100 = np.arange(10.0 + bin_kev / 2, 100.0, bin_kev)
+        n_brems_100 = ((100.0 - e100) / e100).sum()
+        u_ratio = (kvp / W_K_EDGE_KEV - 1.0) / (100.0 / W_K_EDGE_KEV - 1.0)
+        total_lines = _K_YIELD_FRAC_100 * n_brems_100 * u_ratio**_K_YIELD_P
+        energies = np.concatenate([e, line_e])
+        phi = np.concatenate([phi, total_lines * rel / rel.sum()])
+    if anode_angle_deg is not None:
+        phi = phi * anode_self_attenuation(energies, kvp, anode_angle_deg, takeoff_offset_deg)
+    phi = phi * np.exp(-xd.linear_attenuation("aluminum", energies) * al_filter_mm * 1e-3)
+    if cu_filter_mm:
+        phi = phi * np.exp(-xd.filter_attenuation("copper", energies) * cu_filter_mm * 1e-3)
+    order = np.argsort(energies)
+    energies, phi = energies[order], phi[order]
+    return XraySpectrum(energies, phi / phi.sum())
+
+
+def air_kerma_weights(spectrum: XraySpectrum) -> np.ndarray:
+    """Pesos de kerma en aire de cada energía del espectro: ``w_i E_i (mu_en/rho)_aire``."""
+    return spectrum.weights * spectrum.energies_kev * xd.air_mass_energy_absorption(spectrum.energies_kev)
+
+
+def half_value_layer(spectrum: XraySpectrum, material: str = "aluminum", fraction: float = 0.5) -> float:
+    """Capa hemirreductora (mm) del kerma en aire: espesor que lo reduce a ``fraction`` (0.5 = HVL).
+
+    Se resuelve por bisección sobre el espectro discreto (sin aproximar por un haz monoenergético).
+    """
+    kw = air_kerma_weights(spectrum)
+    kw = kw / kw.sum()
+    mu = xd.filter_attenuation(material, spectrum.energies_kev)
+
+    def kerma(t_mm):
+        return float(np.sum(kw * np.exp(-mu * t_mm * 1e-3)))
+
+    lo, hi = 0.0, 1.0
+    while kerma(hi) > fraction:
+        hi *= 2.0
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if kerma(mid) > fraction else (lo, mid)
+    return 0.5 * (lo + hi)
+
+
+def fit_al_filtration(kvp: float, hvl_mm: float, **kw) -> float:
+    """Espesor de Al (mm) de filtración total con el que ``tube_spectrum`` da la HVL ``hvl_mm``."""
+    lo, hi = 0.0, 40.0
+    for _ in range(50):
+        mid = 0.5 * (lo + hi)
+        if half_value_layer(tube_spectrum(kvp, mid, **kw)) < hvl_mm:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
 
 
 def basis_coefficients(tissue: str, spectrum: XraySpectrum) -> tuple[float, float]:
