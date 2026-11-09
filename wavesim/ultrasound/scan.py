@@ -64,11 +64,13 @@ def simulate_bmode(
     tgc_db_per_cm: float | None = None,
     record_transmission: bool = False,
     progress: bool = False,
+    anisotropic_bone: bool = False,
 ) -> UltrasoundScan:
     """Simula una ecografía de onda plana (una simulación FDTD por ángulo) y reconstruye el modo B.
 
     ``max_depth``: profundidad máxima de la imagen (por defecto, la del fantoma).
     ``tgc_db_per_cm``: por defecto 0.5 dB/(cm·MHz) · f0 (compensación típica).
+    ``anisotropic_bone``: cortical transversalmente isótropa (``ElasticSolver``).
     """
     g = phantom.grid
     array = array or default_array(phantom, f0, npml, c0)
@@ -83,7 +85,8 @@ def simulate_bmode(
     depth = max_depth - array.z
     t_end = array.pulse_peak_time + max_delay + (depth + np.hypot(depth, array.aperture)) / 1400.0
     for k, ang in enumerate(angles):
-        solver = ElasticSolver(phantom, f0, npml=npml, n_mechanisms=n_mechanisms, scattering=scattering)
+        solver = ElasticSolver(phantom, f0, npml=npml, n_mechanisms=n_mechanisms, scattering=scattering,
+                               anisotropic_bone=anisotropic_bone)
         delays = array.plane_wave_delays(ang, c0)
         nt = int(np.ceil(t_end / solver.dt))
         t = solver.time_axis(nt)
