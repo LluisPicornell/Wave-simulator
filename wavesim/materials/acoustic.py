@@ -83,6 +83,56 @@ ACOUSTIC: dict[str, AcousticProps] = {
 }
 
 
+@dataclass(frozen=True)
+class TransverseIsotropy:
+    """Rigideces (Pa) de un sólido transversalmente isótropo con el eje de simetría a lo largo del hueso.
+
+    Notación de Voigt con 3 = eje del hueso y 1, 2 = plano transversal
+    (radial y circunferencial): ``c_t = C11 = C22``, ``c_a = C33``,
+    ``c_ta = C13 = C23``, ``g_a = C44 = C55`` (cizalla en los planos que
+    contienen el eje) y ``g_t = C66 = (C11 - C12)/2`` (cizalla en el plano
+    transversal).
+    """
+
+    c_t: float
+    c_a: float
+    c_ta: float
+    g_a: float
+    g_t: float
+
+    def plane(self, view: str) -> tuple[float, float, float, float]:
+        """``(C11, C33, C13, C55)`` en el plano del corte, con x lateral y z en profundidad.
+
+        - ``"longitudinal"``: el eje del hueso va a lo largo de x y z es radial.
+        - ``"cross_section"``: el corte es el plano de isotropía transversa,
+          así que el medio es isótropo en el plano (``C13 = C11 - 2 C55``).
+        """
+        if view == "longitudinal":
+            return self.c_a, self.c_t, self.c_ta, self.g_a
+        if view == "cross_section":
+            return self.c_t, self.c_t, self.c_t - 2.0 * self.g_t, self.g_t
+        raise ValueError(f"corte desconocido '{view}' (use 'longitudinal' o 'cross_section')")
+
+
+#: Cortical humana anisótropa (tibia): medidas ultrasónicas de Rho (Ultrasonics
+#: 34:777, 1996) en 96 muestras de la tibia de 8 cadáveres, como las resume el
+#: resumen de Hoffmeister et al. (Med Biol Eng Comput 38:333, 2000):
+#: c11 = 19.5, c22 = 20.1, c33 = 30.9, c44 = 5.72, c55 = 5.17, c66 = 4.05 y
+#: c23 = 12.5 GPa (verificado en el resumen; el texto completo no era
+#: accesible). La tibia es casi transversalmente isótropa y se reduce a
+#: 5 constantes: ``c_t`` = media de c11 y c22, ``g_a`` = media de c44 y c55 y
+#: ``c_ta`` = c23 (**no verificado**: c13, el acoplamiento radial-axial que
+#: usa el corte longitudinal, no aparecía en el resumen; se supone igual a
+#: c23). C12 = c_t - 2·c66 = 11.7 GPa sale de la isotropía transversa. Como
+#: comprobación, este tensor da los módulos de Young del resumen: 21.0 GPa
+#: a lo largo del eje (publicado: 20.9) y 11.8 GPa perpendicular (11.8).
+#: La densidad de las muestras no se pudo verificar: se usa la de la tabla
+#: (1908 kg/m³), con la que salen ondas P de 4024 m/s axial y 3221 m/s radial
+#: y ondas S de 1690 m/s (planos con el eje) y 1457 m/s (plano transversal),
+#: frente a 3500 y 1800 m/s de la cortical isótropa.
+CORTICAL_STIFFNESS = TransverseIsotropy(c_t=19.8e9, c_a=30.9e9, c_ta=12.5e9, g_a=5.445e9, g_t=4.05e9)
+
+
 def acoustic(key: str) -> AcousticProps:
     return ACOUSTIC[key]
 
