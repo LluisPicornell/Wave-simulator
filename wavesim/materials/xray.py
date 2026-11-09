@@ -80,6 +80,51 @@ VOLUME_MIXTURES: dict[str, tuple[tuple[str, float], ...]] = {
 
 _PE_EXPONENT = 4.0
 
+# ---------------------------------------------------------------------------
+# Materiales del tubo y de la filtración (cobre, wolframio) y kerma en aire
+# ---------------------------------------------------------------------------
+# Rejilla propia: el wolframio tiene el borde K en 69.525 keV, que la rejilla de
+# los tejidos (10, 15, 20, 30, ...) no puede representar; se repite la energía del
+# borde para el salto. VALORES NO VERIFICADOS en esta sesión (la base NIST no era
+# accesible): son los de NIST 126 recordados para el cobre y el aire (error esperado
+# ~2 %) y una estimación aproximada para el wolframio (error esperado ~10 %, sobre todo
+# bajo 20 keV). Sólo afectan a la filtración con Cu y a la autoabsorción en el
+# ánodo; los tejidos y el aluminio usan las tablas de arriba.
+_EDGE_W_KEV = 69.525
+FILTER_ENERGIES_KEV = {
+    "copper": np.array([10, 15, 20, 30, 40, 50, 60, 80, 100, 150, 200, 300], dtype=float),
+    "tungsten": np.array([10, 15, 20, 30, 40, 50, 60, _EDGE_W_KEV - 1e-3, _EDGE_W_KEV + 1e-3, 80, 100, 150, 200,
+                          300], dtype=float),
+    # kerma en aire: coeficiente másico de absorción de energía mu_en/rho (NIST 126, aire seco)
+    "air_en": np.array([10, 15, 20, 30, 40, 50, 60, 80, 100, 150, 200, 300], dtype=float),
+}
+FILTER_TABLES = {
+    "copper": np.array([215.9, 73.0, 33.79, 10.92, 4.862, 2.613, 1.651, 0.7618, 0.4586, 0.2233, 0.1555, 0.1089]),
+    "tungsten": np.array([110.0, 143.0, 66.0, 22.0, 10.2, 5.6, 3.6, 2.7, 11.4, 7.9, 4.44, 1.6, 0.92, 0.41]),
+    "air_en": np.array([4.742, 1.334, 0.5389, 0.1537, 0.06833, 0.04098, 0.03041, 0.02407, 0.02325, 0.02496,
+                        0.02672, 0.02872]),
+}
+DENSITY_G_CM3.update({"copper": 8.96, "tungsten": 19.3})
+
+
+def filter_attenuation(key: str, energy_kev) -> np.ndarray:
+    """``mu`` lineal (1/m) de un material de filtración: aluminio, cobre o wolframio (log-log)."""
+    if key == "aluminum":
+        return linear_attenuation(key, energy_kev)
+    e = np.asarray(energy_kev, dtype=float)
+    grid, table = FILTER_ENERGIES_KEV[key], FILTER_TABLES[key]
+    if np.any((e < grid[0]) | (e > grid[-1])):
+        raise ValueError(f"Energía fuera del rango tabulado de {key} ({grid[0]:.0f}-{grid[-1]:.0f} keV)")
+    mu_rho = np.exp(np.interp(np.log(e), np.log(grid), np.log(table)))
+    return mu_rho * DENSITY_G_CM3[key] * 100.0
+
+
+def air_mass_energy_absorption(energy_kev) -> np.ndarray:
+    """``mu_en/rho`` del aire (cm²/g), para ponderar el espectro en kerma en aire (10-300 keV)."""
+    e = np.asarray(energy_kev, dtype=float)
+    grid = FILTER_ENERGIES_KEV["air_en"]
+    return np.exp(np.interp(np.log(np.clip(e, grid[0], grid[-1])), np.log(grid), np.log(FILTER_TABLES["air_en"])))
+
 
 def _descriptors(comp: dict[str, float]) -> np.ndarray:
     total = sum(comp.values())
