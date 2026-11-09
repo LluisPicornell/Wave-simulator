@@ -91,7 +91,9 @@ class ElasticSolver:
     Parámetros principales:
       - ``npml``: grosor de la capa absorbente (celdas).
       - ``n_mechanisms``: mecanismos de relajación para la atenuación (0 = sin
-        atenuación; 1 es suficiente para pulsos de banda moderada).
+        atenuación). Con 1 el error frente a la ley de potencia llega al
+        ~14 % en la banda del pulso; con 2, < 2 % en [0.5, 1.8]·f0; con 3,
+        < 2 % en [0.3, 2.5]·f0, para exponentes de 1 a 2 (ver ``attenuation``).
       - ``scattering``: escala de la heterogeneidad que produce speckle.
       - ``cfl``: fracción del paso temporal máximo estable.
       - ``backend``: "numpy" (referencia), "numba" (kernels fusionados y
@@ -124,13 +126,14 @@ class ElasticSolver:
         self.n_mech = m.tau_sigma.size
 
         # Módulos relajados corregidos por dispersión y no relajados
-        fp = att.relaxed_modulus_factor(m.tau_p, m.tau_sigma, f0) if self.n_mech else 1.0
-        fs = att.relaxed_modulus_factor(m.tau_s, m.tau_sigma, f0) if self.n_mech else 1.0
+        L = self.n_mech
+        w_p, w_s = m.weights("p"), m.weights("s")
+        fp = att.relaxed_modulus_factor(w_p, m.tau_sigma, f0) if L else 1.0
+        fs = att.relaxed_modulus_factor(w_s, m.tau_sigma, f0) if L else 1.0
         pi_r = m.rho * m.cp**2 * fp
         mu_r = m.rho * m.cs**2 * fs
-        L = self.n_mech
-        pi_u = pi_r * (1 + L * m.tau_p)
-        mu_u = mu_r * (1 + L * m.tau_s)
+        pi_u = pi_r * (1 + w_p.sum(axis=0))
+        mu_u = mu_r * (1 + w_s.sum(axis=0))
         cp_u_max = float(np.sqrt(np.max(pi_u / m.rho)))
         self.dt = cfl * dx / (cp_u_max * np.sqrt(2.0) * (C1 + abs(C2)))
         dt = self.dt
@@ -149,9 +152,10 @@ class ElasticSolver:
         self.dtbz = f(dt * 2.0 / (m.rho + _shift(m.rho, 0)))
         self.has_shear = bool(np.any(mu_u > 0))
         if self.n_mech:
-            self.dt_pi_t = f(dt * pi_r * m.tau_p)
-            self.dt_mu2_t = f(dt * 2 * mu_r * m.tau_s)
-            self.dt_mu_t_xz = f(dt * _harmonic_xz(mu_r * m.tau_s))
+            # Un coeficiente por mecanismo, (L, nz, nx): cada uno con su peso
+            self.dt_pi_t = f(dt * pi_r * w_p)
+            self.dt_mu2_t = f(dt * 2 * mu_r * w_s)
+            self.dt_mu_t_xz = f(np.stack([dt * _harmonic_xz(mu_r * w) for w in w_s]))
             ts = m.tau_sigma
             self.mem_a = (1 - dt / (2 * ts)) / (1 + dt / (2 * ts))
             self.mem_b = (dt / ts) / (1 + dt / (2 * ts))
@@ -228,7 +232,7 @@ class ElasticSolver:
             self._nb_mem = (np.asarray(self.mem_a, np.float64), np.asarray(self.mem_b, np.float64))
         else:
             # Marcadores de posición: con n_mech = 0 el kernel no los lee
-            relax = (np.zeros((1, 1), self.dtype),) * 3
+            relax = (np.zeros((1, 1, 1), self.dtype),) * 3
             self._nb_mem = (np.zeros(0), np.zeros(0))
         self._nb_relax = relax
 
@@ -356,27 +360,26 @@ class ElasticSolver:
             np.multiply(self.dt_mu_xz, exz, out=a2)
             self.sxz += a2
 
-        # --- memorias viscoelásticas
+        # --- memorias viscoelásticas (cada mecanismo con su propio peso)
         if self.n_mech:
             f_xx, f_zz = acc, a1
-            np.multiply(self.dt_pi_t, div, out=a2)  # parte volumétrica común
-            np.multiply(self.dt_mu2_t, ezz, out=f_xx)
-            np.subtract(a2, f_xx, out=f_xx)
-            np.multiply(self.dt_mu2_t, exx, out=f_zz)
-            np.subtract(a2, f_zz, out=f_zz)
-            for l in range(self.n_mech):
-                self._memory(self.sxx, self.rxx[l], f_xx, l, a2)
-                self._memory(self.szz, self.rzz[l], f_zz, l, a2)
-            if self.has_shear:
-                np.multiply(self.dt_mu_t_xz, exz, out=f_xx)
-                for l in range(self.n_mech):
-                    self._memory(self.sxz, self.rxz[l], f_xx, l, a2)
+            for m in range(self.n_mech):
+                np.multiply(self.dt_pi_t[m], div, out=a2)  # parte volumétrica común
+                np.multiply(self.dt_mu2_t[m], ezz, out=f_xx)
+                np.subtract(a2, f_xx, out=f_xx)
+                np.multiply(self.dt_mu2_t[m], exx, out=f_zz)
+                np.subtract(a2, f_zz, out=f_zz)
+                self._memory(self.sxx, self.rxx[m], f_xx, m, a2)
+                self._memory(self.szz, self.rzz[m], f_zz, m, a2)
+                if self.has_shear:
+                    np.multiply(self.dt_mu_t_xz[m], exz, out=f_xx)
+                    self._memory(self.sxz, self.rxz[m], f_xx, m, a2)
 
         self._apply_pressure_sources(n)
 
-    def _memory(self, stress, r, forcing, l, tmp):
+    def _memory(self, stress, r, forcing, mech, tmp):
         """sigma += (r_new + r_old)/2 ;  r_new = A r_old - B F  (Crank-Nicolson)."""
-        a, b = self.mem_a[l], self.mem_b[l]
+        a, b = self.mem_a[mech], self.mem_b[mech]
         np.multiply(r, 0.5 * (1 + a), out=tmp)
         stress += tmp
         np.multiply(forcing, 0.5 * b, out=tmp)
