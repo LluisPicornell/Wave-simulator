@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from ..materials import porous
-from ..materials.acoustic import ACOUSTIC
+from ..materials.acoustic import ACOUSTIC, CORTICAL_STIFFNESS
 from ..phantoms.phantom import TISSUE_INDEX, Phantom
 from . import attenuation as att
 
@@ -61,6 +61,14 @@ class ElasticMedium:
     ``tau_p`` y ``tau_s`` son los pesos ``y_l`` de los mecanismos de
     relajación (``attenuation``) para las ondas P y S: arrays ``(L, nz, nx)``,
     uno por mecanismo, o ``(nz, nx)`` con el mismo peso para todos (método tau).
+
+    ``stiffness`` (opcional): medio transversalmente isótropo con los ejes de
+    la malla, ``(4, nz, nx)`` con ``C11, C33, C13, C55`` divididas por la
+    densidad (m²/s²): ``sxx = C11 exx + C13 ezz``, ``szz = C13 exx + C33 ezz``,
+    ``sxz = C55 exz``. ``None`` = isótropo, con ``cp`` y ``cs``. Las
+    rigideces se multiplican por ``rho`` celda a celda (como ``cp`` y ``cs``,
+    así el *speckle* de densidad no cambia las velocidades). ``cp`` y ``cs``
+    se siguen usando para normalizar las fuentes de fuerza.
     """
 
     rho: np.ndarray
@@ -70,6 +78,7 @@ class ElasticMedium:
     tau_s: np.ndarray
     tau_sigma: np.ndarray
     f0: float
+    stiffness: np.ndarray | None = None
 
     @property
     def is_solid(self) -> np.ndarray:
@@ -84,7 +93,7 @@ class ElasticMedium:
 
 
 def elastic_medium(phantom: Phantom, f0: float, n_mechanisms: int = 1, scattering: float = 1.0,
-                   attenuation: bool = True) -> ElasticMedium:
+                   attenuation: bool = True, anisotropic_bone: bool = False) -> ElasticMedium:
     """Construye el medio para el solver elástico a la frecuencia central ``f0``.
 
     ``scattering`` escala ``SCATTER_STRENGTH`` (0 = tejidos perfectamente
@@ -94,6 +103,13 @@ def elastic_medium(phantom: Phantom, f0: float, n_mechanisms: int = 1, scatterin
     Si el fantoma tiene mapa de porosidad, las celdas de hueso toman las
     propiedades del medio efectivo (``materials.porous``): la dispersión por
     los poros la produce el propio solver a partir de ese mapa.
+
+    ``anisotropic_bone``: la cortical toma las rigideces transversalmente
+    isótropas de ``materials.acoustic.CORTICAL_STIFFNESS`` orientadas según el
+    corte (``phantom.meta["view"]``, ver ``_anisotropic_cortex``). En el corte
+    transversal el plano es el de isotropía y el medio sigue siendo isótropo
+    (otras velocidades). La atenuación (Q) es la de la tabla en todas las
+    direcciones.
     """
     n_mech = n_mechanisms if attenuation else 0
     tau_sigma = att.relaxation_times(f0, n_mech)
@@ -116,6 +132,7 @@ def elastic_medium(phantom: Phantom, f0: float, n_mechanisms: int = 1, scatterin
         tau_s[m] = phantom.property_map({k: w[1, m] for k, w in table.items()}.__getitem__)
     if phantom.porosity is not None:
         _porous_cells(phantom, f0, band, tau_sigma, rho, cp, cs, tau_p, tau_s)
+    stiffness = _anisotropic_cortex(phantom, f0, rho, cp, cs) if anisotropic_bone else None
 
     if scattering > 0 and phantom.heterogeneity is not None:
         # La heterogeneidad es ruido blanco *por celda*: la varianza de densidad por unidad
@@ -126,7 +143,7 @@ def elastic_medium(phantom: Phantom, f0: float, n_mechanisms: int = 1, scatterin
         strength = phantom.property_map(lambda k: SCATTER_STRENGTH.get(k, 0.0), physics="acoustic") * scattering
         strength = strength * (DX_REF / phantom.grid.dx)
         rho = rho * (1.0 + strength * np.clip(phantom.heterogeneity, -3, 3))
-    return ElasticMedium(rho, cp, cs, tau_p, tau_s, tau_sigma, f0)
+    return ElasticMedium(rho, cp, cs, tau_p, tau_s, tau_sigma, f0, stiffness)
 
 
 def _porous_cells(phantom: Phantom, f0: float, band: np.ndarray, tau_sigma: np.ndarray, rho, cp, cs, tau_p,
@@ -160,3 +177,74 @@ def _porous_cells(phantom: Phantom, f0: float, band: np.ndarray, tau_sigma: np.n
         for m in range(tau_sigma.size):
             tau_p[m, cells] = np.interp(phi, _PHI_SAMPLES, w_p[:, m])
             tau_s[m, cells] = np.where(solid, np.interp(phi, _PHI_SAMPLES, w_s[:, m]), 0.0)
+
+
+def isotropic_stiffness(cp: np.ndarray, cs: np.ndarray) -> np.ndarray:
+    """``(C11, C33, C13, C55) / rho`` de un medio isótropo."""
+    p2, s2 = np.broadcast_arrays(np.asarray(cp, dtype=float) ** 2, np.asarray(cs, dtype=float) ** 2)
+    return np.stack([p2, p2, p2 - 2.0 * s2, s2])
+
+
+def _anisotropic_cortex(phantom: Phantom, f0: float, rho: np.ndarray, cp: np.ndarray,
+                        cs: np.ndarray) -> np.ndarray | None:
+    """Rigideces de la cortical transversalmente isótropa; devuelve ``stiffness`` o ``None`` si queda isótropa.
+
+    El corte se lee de ``phantom.meta["view"]``: en el longitudinal el eje
+    del hueso va a lo largo de x (se ignora la inclinación del hueso,
+    ``bone_tilt_deg``, de pocos grados); en el transversal el plano es el de
+    isotropía y basta con cambiar ``cp`` y ``cs`` de la cortical (in situ).
+
+    Porosidad (modo realista): ``rho``, ``cp`` y ``cs`` ya traen en cada
+    celda el medio efectivo isótropo de ``materials.porous`` (Hashin-Shtrikman
+    2D). A esos módulos se suma la desviación anisótropa de la tabla
+    (``CORTICAL_STIFFNESS`` menos la cortical isótropa), escalada con la
+    rigidez de cizalla efectiva relativa a la de la tabla: en la porosidad de
+    referencia (la de la tabla) la celda toma exactamente las rigideces
+    publicadas; un poro resuelto (fluido) queda isótropo; la matriz sin poros,
+    algo más anisótropa. Como en ``_porous_cells``, la onda S de una celda
+    porosa se suprime si su velocidad más lenta (en cualquier dirección) cae
+    por debajo de ``MIN_SHEAR_PPW`` puntos por longitud de onda.
+
+    Es una aproximación: los canales de Havers, alineados con el eje, deberían
+    reducir más la rigidez transversal que la axial; Cai et al. (J R Soc
+    Interface 16:20180911, 2019) encuentran que la porosidad explica casi toda
+    la variación de la rigidez, y la forma y organización de los poros poco.
+    """
+    view = phantom.meta.get("view")
+    if view not in ("longitudinal", "cross_section"):
+        raise ValueError("anisotropic_bone necesita phantom.meta['view'] = 'longitudinal' o 'cross_section' "
+                         f"(es {view!r}) para orientar el eje del hueso")
+    cells = phantom.labels == TISSUE_INDEX["cortical_bone"]
+    if not cells.any():
+        return None
+    t = ACOUSTIC["cortical_bone"]
+    pi_t, mu_t = t.density * t.c_p**2, t.density * t.c_s**2
+    deviation = np.array(CORTICAL_STIFFNESS.plane(view)) - np.array([pi_t, pi_t, pi_t - 2.0 * mu_t, mu_t])
+    r, mu = rho[cells], rho[cells] * cs[cells] ** 2
+    moduli = r * isotropic_stiffness(cp[cells], cs[cells]) + (mu / mu_t) * deviation[:, None]
+    if phantom.porosity is not None:
+        slowest = np.min([christoffel_speeds(moduli / r, th)[1] for th in np.linspace(0.0, np.pi / 2, 7)], axis=0)
+        fluid = np.isfinite(phantom.porosity[cells]) & (slowest < MIN_SHEAR_PPW * f0 * phantom.grid.dx)
+        moduli[:, fluid] = r[fluid] * isotropic_stiffness(cp[cells][fluid], 0.0)
+        cs[cells] = np.where(fluid, 0.0, cs[cells])
+    if view == "cross_section":
+        cp[cells] = np.sqrt(moduli[0] / r)
+        cs[cells] = np.sqrt(moduli[3] / r)
+        return None
+    stiffness = isotropic_stiffness(cp, cs)
+    stiffness[:, cells] = moduli / r
+    return stiffness
+
+
+def christoffel_speeds(stiffness, theta) -> tuple[np.ndarray, np.ndarray]:
+    """Velocidades de fase ``(qP, qSV)`` (m/s) en la dirección ``theta`` (rad, desde el eje x hacia z).
+
+    ``stiffness``: ``(C11, C33, C13, C55) / rho`` (escalares o arrays). Son
+    los autovalores de la matriz de Christoffel del plano x-z.
+    """
+    c11, c33, c13, c55 = (np.asarray(c, dtype=float) for c in stiffness)
+    nx2, nz2 = np.cos(theta) ** 2, np.sin(theta) ** 2
+    g11, g33 = c11 * nx2 + c55 * nz2, c55 * nx2 + c33 * nz2
+    g13 = (c13 + c55) * np.sqrt(nx2 * nz2)
+    half, root = 0.5 * (g11 + g33), np.sqrt(0.25 * (g11 - g33) ** 2 + g13**2)
+    return np.sqrt(half + root), np.sqrt(np.maximum(half - root, 0.0))
