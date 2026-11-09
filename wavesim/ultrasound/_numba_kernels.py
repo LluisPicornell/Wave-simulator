@@ -125,8 +125,9 @@ def stress_kernel(
 ):  # fmt: skip
     """Deformaciones, tensiones y memorias viscoelásticas (Crank-Nicolson).
 
-    ``rxx``, ``rzz``, ``rxz`` son pilas ``(n_mech, nz, nx)``; con ``n_mech = 0``
-    el bucle de memorias no se ejecuta y los coeficientes ``*_t`` no se leen.
+    ``rxx``, ``rzz``, ``rxz`` y los coeficientes ``*_t`` (uno por mecanismo)
+    son pilas ``(n_mech, nz, nx)``; con ``n_mech = 0`` el bucle de memorias no
+    se ejecuta y los coeficientes no se leen.
     """
     nz, nx = vx.shape
     n_mech = mem_a.shape[0]
@@ -150,29 +151,38 @@ def stress_kernel(
             if has_shear:
                 sxz_v += dt_mu_xz[i, j] * exz
 
-            if n_mech > 0:
-                vol = dt_pi_t[i, j] * div
-                f_xx = vol - dt_mu2_t[i, j] * ezz
-                f_zz = vol - dt_mu2_t[i, j] * exx
-                f_xz = dt_mu_t_xz[i, j] * exz
-                for l in range(n_mech):
-                    a, b = mem_a[l], mem_b[l]
-                    half_a, half_b = 0.5 * (1.0 + a), 0.5 * b
-                    # Los escalares de memoria son float64 (como en NumPy): se
-                    # multiplica en doble precisión y se redondea al guardar
-                    r = rxx[l, i, j]
-                    sx = sx + F32(r * half_a)
-                    sx = sx - F32(f_xx * half_b)
-                    rxx[l, i, j] = F32(r * a) - F32(f_xx * b)
-                    r = rzz[l, i, j]
-                    sz = sz + F32(r * half_a)
-                    sz = sz - F32(f_zz * half_b)
-                    rzz[l, i, j] = F32(r * a) - F32(f_zz * b)
-                    if has_shear:
-                        r = rxz[l, i, j]
-                        sxz_v = sxz_v + F32(r * half_a)
-                        sxz_v = sxz_v - F32(f_xz * half_b)
-                        rxz[l, i, j] = F32(r * a) - F32(f_xz * b)
+            # Sin cizalla (fluido) los coeficientes de cizalla de las memorias son
+            # nulos y rxz no sale de cero: no se leen. Es la mayoría de la malla
+            # y el bucle está limitado por el ancho de banda de memoria.
+            fluid = dt_mu2[i, j] == F32(0.0)
+            shear_xz = has_shear and dt_mu_xz[i, j] != F32(0.0)
+            for m in range(n_mech):
+                # Cada mecanismo tiene su propio peso: coeficientes (L, nz, nx)
+                vol = dt_pi_t[m, i, j] * div
+                if fluid:
+                    f_xx = vol
+                    f_zz = vol
+                else:
+                    f_xx = vol - dt_mu2_t[m, i, j] * ezz
+                    f_zz = vol - dt_mu2_t[m, i, j] * exx
+                a, b = mem_a[m], mem_b[m]
+                half_a, half_b = 0.5 * (1.0 + a), 0.5 * b
+                # Los escalares de memoria son float64 (como en NumPy): se
+                # multiplica en doble precisión y se redondea al guardar
+                r = rxx[m, i, j]
+                sx = sx + F32(r * half_a)
+                sx = sx - F32(f_xx * half_b)
+                rxx[m, i, j] = F32(r * a) - F32(f_xx * b)
+                r = rzz[m, i, j]
+                sz = sz + F32(r * half_a)
+                sz = sz - F32(f_zz * half_b)
+                rzz[m, i, j] = F32(r * a) - F32(f_zz * b)
+                if shear_xz:
+                    f_xz = dt_mu_t_xz[m, i, j] * exz
+                    r = rxz[m, i, j]
+                    sxz_v = sxz_v + F32(r * half_a)
+                    sxz_v = sxz_v - F32(f_xz * half_b)
+                    rxz[m, i, j] = F32(r * a) - F32(f_xz * b)
 
             sxx[i, j] = sx
             szz[i, j] = sz

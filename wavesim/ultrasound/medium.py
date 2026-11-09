@@ -56,7 +56,12 @@ MICROSTRUCTURE_EDGE = 24
 
 @dataclass
 class ElasticMedium:
-    """Propiedades por celda: densidad, velocidades P/S y parámetros tau del GSLS."""
+    """Propiedades por celda: densidad, velocidades P/S y pesos de los mecanismos del GSLS.
+
+    ``tau_p`` y ``tau_s`` son los pesos ``y_l`` de los mecanismos de
+    relajación (``attenuation``) para las ondas P y S: arrays ``(L, nz, nx)``,
+    uno por mecanismo, o ``(nz, nx)`` con el mismo peso para todos (método tau).
+    """
 
     rho: np.ndarray
     cp: np.ndarray
@@ -69,6 +74,13 @@ class ElasticMedium:
     @property
     def is_solid(self) -> np.ndarray:
         return self.cs > 0
+
+    def weights(self, wave: str) -> np.ndarray:
+        """Pesos ``(L, nz, nx)`` de los mecanismos para la onda ``"p"`` o ``"s"``."""
+        w = np.asarray(self.tau_p if wave == "p" else self.tau_s)
+        if w.ndim == 2:
+            return np.broadcast_to(w, (self.tau_sigma.size, *w.shape))
+        return w
 
 
 def elastic_medium(phantom: Phantom, f0: float, n_mechanisms: int = 1, scattering: float = 1.0,
@@ -83,22 +95,25 @@ def elastic_medium(phantom: Phantom, f0: float, n_mechanisms: int = 1, scatterin
     propiedades del medio efectivo (``materials.porous``): la dispersión por
     los poros la produce el propio solver a partir de ese mapa.
     """
-    tau_sigma = att.relaxation_times(f0, n_mechanisms if attenuation else 0)
-    band = att.fit_band(f0)
+    n_mech = n_mechanisms if attenuation else 0
+    tau_sigma = att.relaxation_times(f0, n_mech)
+    band = att.fit_band(f0, n_mech)
     rho = phantom.property_map(lambda k: ACOUSTIC[k].density)
     cp = phantom.property_map(lambda k: ACOUSTIC[k].c_p)
     cs = phantom.property_map(lambda k: ACOUSTIC[k].c_s)
 
-    def tau_for(k: str, shear: bool) -> float:
-        p = ACOUSTIC[k]
-        c = p.c_s if shear else p.c_p
-        if c <= 0 or tau_sigma.size == 0:
-            return 0.0
-        alpha = np.array([p.alpha_np_per_m(f, shear=shear) for f in band])
-        return att.fit_tau(att.target_qinv(alpha, c, band), tau_sigma, band)
-
-    tau_p = phantom.property_map(lambda k: tau_for(k, False))
-    tau_s = phantom.property_map(lambda k: tau_for(k, True))
+    # Pesos de cada tejido presente, ajustados todos a la vez: filas (tejido, onda)
+    keys = phantom.present_tissues()
+    rows = [(k, shear) for k in keys for shear in (False, True)]
+    alpha = np.array([[ACOUSTIC[k].alpha_np_per_m(f, shear=shear) for f in band] for k, shear in rows])
+    speed = np.array([ACOUSTIC[k].c_s if shear else ACOUSTIC[k].c_p for k, shear in rows])
+    fitted = att.mechanism_weights(alpha, speed, band, tau_sigma, f0).reshape(len(keys), 2, n_mech)
+    table = {k: fitted[n] for n, k in enumerate(keys)}
+    tau_p = np.zeros((n_mech, *rho.shape))
+    tau_s = np.zeros((n_mech, *rho.shape))
+    for m in range(n_mech):
+        tau_p[m] = phantom.property_map({k: w[0, m] for k, w in table.items()}.__getitem__)
+        tau_s[m] = phantom.property_map({k: w[1, m] for k, w in table.items()}.__getitem__)
     if phantom.porosity is not None:
         _porous_cells(phantom, f0, band, tau_sigma, rho, cp, cs, tau_p, tau_s)
 
@@ -114,20 +129,12 @@ def elastic_medium(phantom: Phantom, f0: float, n_mechanisms: int = 1, scatterin
     return ElasticMedium(rho, cp, cs, tau_p, tau_s, tau_sigma, f0)
 
 
-def _fit_taus(alpha: np.ndarray, c: np.ndarray, band: np.ndarray, tau_sigma: np.ndarray) -> np.ndarray:
-    """``tau`` del GSLS para cada fila de ``alpha`` (Np/m en ``band``) con velocidad ``c``."""
-    if tau_sigma.size == 0:
-        return np.zeros(c.size)
-    return np.array([att.fit_tau(att.target_qinv(a, ck, band), tau_sigma, band) if ck > 0 else 0.0
-                     for a, ck in zip(alpha, c)])
-
-
 def _porous_cells(phantom: Phantom, f0: float, band: np.ndarray, tau_sigma: np.ndarray, rho, cp, cs, tau_p,
                   tau_s) -> None:
     """Sustituye en las celdas porosas las propiedades de la tabla por las del medio efectivo.
 
-    Las propiedades (``materials.porous.acoustic_effective``) y sus
-    parámetros GSLS se tabulan en función de la porosidad y se interpolan en
+    Las propiedades (``materials.porous.acoustic_effective``) y los pesos de
+    sus mecanismos GSLS se tabulan en función de la porosidad y se interpolan en
     cada celda. La onda S se suprime donde su velocidad cae por debajo de
     ``MIN_SHEAR_PPW`` puntos por longitud de onda. En la banda de borde
     (``MICROSTRUCTURE_EDGE``) la porosidad es la media del tejido.
@@ -148,6 +155,8 @@ def _porous_cells(phantom: Phantom, f0: float, band: np.ndarray, tau_sigma: np.n
         rho[cells] = np.interp(phi, _PHI_SAMPLES, eff.rho)
         cp[cells] = np.interp(phi, _PHI_SAMPLES, eff.c_p)
         cs[cells] = np.where(solid, shear, 0.0)
-        tau_p[cells] = np.interp(phi, _PHI_SAMPLES, _fit_taus(eff.alpha_p, eff.c_p, band, tau_sigma))
-        tau_shear = np.interp(phi, _PHI_SAMPLES, _fit_taus(eff.alpha_s, eff.c_s, band, tau_sigma))
-        tau_s[cells] = np.where(solid, tau_shear, 0.0)
+        w_p = att.mechanism_weights(eff.alpha_p, eff.c_p, band, tau_sigma, f0)
+        w_s = att.mechanism_weights(eff.alpha_s, eff.c_s, band, tau_sigma, f0)
+        for m in range(tau_sigma.size):
+            tau_p[m, cells] = np.interp(phi, _PHI_SAMPLES, w_p[:, m])
+            tau_s[m, cells] = np.where(solid, np.interp(phi, _PHI_SAMPLES, w_s[:, m]), 0.0)
