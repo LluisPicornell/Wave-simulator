@@ -260,7 +260,7 @@ def run_u3(backend="auto", quick=False) -> dict:
     dt_fixed = plane_wave_1d(WATER, "pressure", 32, cfl=0.1, backend=backend)["dt"]
     print(f"\n--- mismo caso con dt fijo = {dt_fixed*1e9:.2f} ns (CFL 0.1 a 32 ppw): error espacial ---")
     print("ppw   CFL     c_med/c-1   predicho(esquema)   error L2")
-    rows = [plane_wave_1d(WATER, "pressure", p, dt=dt_fixed, backend=backend) for p in (4, 6, 8, 12, 16)]
+    rows = [plane_wave_1d(WATER, "pressure", p, dt=dt_fixed, backend=backend) for p in (6, 8, 12, 16)]
     for r in rows:
         print(f"{r['ppw']:3.0f} {r['cfl']:6.3f} {r['err']:+11.3e} {r['pred']:+15.3e} {r['l2']:12.3e}")
     print("pendientes locales err c:", _fmt_slopes(slopes([r["dx"] for r in rows], [r["err"] for r in rows])))

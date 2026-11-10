@@ -604,8 +604,8 @@ def _slip_terms(solid: np.ndarray, shear: np.ndarray, margin: int) -> dict[str, 
     lado de la interfaz. El fluido no viscoso desliza, así que esa velocidad no
     es la prolongación de la del sólido y el salto entra con peso C2/dx: un
     error O(1) que no baja al refinar la malla (R(θ) agua-hueso quedaba ~1 %
-    alto a 45° y ~2.5 % a 50° tanto con 25 como con 35 puntos por longitud de
-    onda; caso u4 de ``benchmarks/elastic_validation.py``). Ese punto exterior
+    alto a 45° tanto con 25 como con 35 puntos por longitud de onda, y 2.7 % a
+    50° con 25; ``docs/validacion/elastico.md``). Ese punto exterior
     se sustituye por el nodo interior del mismo lado (extrapolación de orden
     cero: el estencil sigue anulando las constantes).
 
