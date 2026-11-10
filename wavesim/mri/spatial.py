@@ -43,6 +43,15 @@ isocromato agrupada por filas de la codificación de fase (modo
 ``"steady"``). El modo ``"events"`` simula TR a TR y línea a línea (con
 transitorio si se pide), y sirve para comprobar el primero.
 
+**Artefactos** (``BlochPhysics``; ``bloch_scan`` los incluye todos por
+defecto): desplazamiento químico de la grasa (uno o seis picos) en la
+dirección de lectura, ``Δf / BW`` píxeles; campo ΔB0 de la susceptibilidad
+de los tejidos (``susceptibility.py``), que distorsiona la lectura y, al
+sumar las celdas de un vóxel, hace perder señal en GRE (no en espín-eco,
+que lo reenfoca) y deja grasa sin saturar en la saturación espectral;
+sensibilidad de recepción no uniforme y ruido gaussiano complejo en el
+k-space.
+
 Convenciones: SI (s, T, m, rad/s); ``M_xy = Mx + i My`` precesa como
 ``exp(-i w t)`` (γ > 0, ``dM/dt = γ M × B``), como ``bloch.py``. Los
 tiempos de ``Sequence`` siguen en ms.
@@ -56,7 +65,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..materials import porous
-from ..materials.mri import FAT_FRACTION, GAMMA_BAR, MRI
+from ..materials.mri import FAT_FRACTION, FAT_PEAKS, GAMMA_BAR, MRI
 from ..phantoms.phantom import TISSUE_INDEX, Phantom
 from .imaging import MRIImage
 from .sequences import Sequence, resolve, tissue_signal
@@ -722,11 +731,115 @@ def phantom_isochromats(phantom: Phantom, b0: float, texture: float = 0.02, cell
 
 
 # --------------------------------------------------------------------------
-# Imagen de un fantoma
+# Física de los artefactos e imagen de un fantoma
 # --------------------------------------------------------------------------
+@dataclass(frozen=True)
+class SurfaceCoil:
+    """Bobina de recepción de superficie: espira de radio ``radius`` centrada en ``center = (x, z)`` (m).
+
+    Sensibilidad ``(R² / (R² + d²))^(3/2)``, con ``d`` la distancia al
+    centro de la espira: la ley del campo en el eje de una espira circular,
+    aplicada con la distancia. Es un modelo simple de la caída de la señal
+    con la profundidad (la bobina de superficie típica de las
+    extremidades), no un cálculo de Biot-Savart.
+    """
+
+    center: tuple[float, float]
+    radius: float
+
+    def sensitivity(self, X: np.ndarray, Z: np.ndarray) -> np.ndarray:
+        d2 = (X - self.center[0]) ** 2 + (Z - self.center[1]) ** 2
+        return (self.radius**2 / (self.radius**2 + d2)) ** 1.5
+
+
+@dataclass(frozen=True)
+class BlochPhysics:
+    """Qué física de artefactos incluye ``bloch_scan`` (por defecto, toda).
+
+    - ``chemical_shift``: la grasa precesa a su frecuencia (``fat_model``
+      ``"single"``: -3.4 ppm; ``"multipeak"``: los seis picos de
+      ``materials.mri.FAT_PEAKS``). Se desplaza en la lectura
+      ``Δf / BW`` píxeles.
+    - ``susceptibility``: campo ΔB0 del mapa de χ con el núcleo dipolar
+      (``mri.susceptibility``); ``b0_direction``: ``"x"``, ``"z"`` (en el
+      plano), ``"y"`` (perpendicular al corte), un vector o ``"auto"``: la
+      geometría de un equipo de túnel con la extremidad a lo largo de B0
+      (``"y"`` en el corte transversal, ``"x"`` —el eje del hueso— en el
+      longitudinal; ``"z"`` si el fantoma no dice qué corte es).
+      ``center_frequency``: resta la mediana de ΔB0 en los tejidos acuosos
+      (el ajuste de frecuencia del equipo). ``field_padding``: ver
+      ``susceptibility.dipole_field``.
+    - ``t2_prime``: desfase microscópico lorentziano con el T2' de la tabla
+      (el T2* de las ecuaciones analíticas). El desfase entre las celdas de
+      un vóxel por el campo calculado se suma solo.
+    - ``coil``: sensibilidad de recepción: ``None`` (uniforme), una
+      ``SurfaceCoil``, un mapa ``(nz, nx)`` o una función ``(X, Z) -> mapa``.
+    """
+
+    chemical_shift: bool = True
+    fat_model: str = "single"
+    susceptibility: bool = True
+    b0_direction: str | tuple = "auto"
+    center_frequency: bool = True
+    field_padding: float = 1.0
+    t2_prime: bool = True
+    coil: object = None
+
+    @classmethod
+    def none(cls) -> "BlochPhysics":
+        """Sin artefactos: ni desplazamiento químico ni B0 no uniforme (se conserva el T2' de la tabla)."""
+        return cls(chemical_shift=False, susceptibility=False)
+
+    def direction(self, phantom: Phantom):
+        if not (isinstance(self.b0_direction, str) and self.b0_direction == "auto"):
+            return self.b0_direction
+        view = phantom.meta.get("view")
+        return {"cross_section": "y", "longitudinal": "x"}.get(view, "z")
+
+
+#: Tejidos cuya frecuencia ajusta el equipo (agua libre o de tejido blando, sin grasa ni hueso).
+_WATER_TISSUES = ("muscle", "skin", "blood", "edema", "hematoma", "water", "fascia", "periosteum")
+
+
+def field_map_hz(phantom: Phantom, b0: float, physics: BlochPhysics) -> np.ndarray:
+    """ΔB0 en Hz en cada celda del fantoma (0 si ``physics.susceptibility`` es falso)."""
+    if not physics.susceptibility:
+        return np.zeros(phantom.grid.shape)
+    from .susceptibility import dipole_field, susceptibility_map
+
+    ppm = dipole_field(susceptibility_map(phantom), physics.direction(phantom), padding=physics.field_padding)
+    hz = ppm * 1e-6 * GAMMA_BAR * b0
+    if physics.center_frequency:
+        water = np.isin(phantom.labels, [TISSUE_INDEX[k] for k in _WATER_TISSUES])
+        if not water.any():
+            water = phantom.property_map(lambda k: MRI[k].pd) > 0
+        if water.any():
+            hz = hz - np.median(hz[water])
+    return hz
+
+
+def _coil_map(phantom: Phantom, coil) -> np.ndarray | None:
+    if coil is None:
+        return None
+    X, Z = phantom.grid.meshgrid()
+    if isinstance(coil, SurfaceCoil):
+        return coil.sensitivity(X, Z).astype(complex)
+    if callable(coil):
+        return np.asarray(coil(X, Z), dtype=complex)
+    m = np.asarray(coil, dtype=complex)
+    if m.shape != phantom.grid.shape:
+        raise ValueError(f"el mapa de bobina debe tener la forma del fantoma {phantom.grid.shape}")
+    return m
+
+
 @dataclass
 class BlochImage(MRIImage):
-    """Imagen del simulador de Bloch espacial (``ideal`` = magnitud sin ruido)."""
+    """Imagen del simulador de Bloch espacial (``ideal`` = magnitud sin ruido).
+
+    ``field_hz``: ΔB0 (Hz) en la malla del fantoma; ``fat_shift_px``:
+    desplazamiento químico esperado de la grasa a -3.4 ppm en la lectura,
+    ``Δf / bandwidth`` (negativo = hacia coordenadas menores).
+    """
 
     complex_image: np.ndarray | None = None
     kspace: np.ndarray | None = None
@@ -734,6 +847,9 @@ class BlochImage(MRIImage):
     readout: str = "x"
     n_isochromats: int = 0
     timings: dict = field(default_factory=dict)
+    field_hz: np.ndarray | None = None
+    fat_shift_px: float = 0.0
+    physics: BlochPhysics | None = None
 
 
 def _even(v: float, lo: int, hi: int) -> int:
@@ -744,8 +860,8 @@ def _even(v: float, lo: int, hi: int) -> int:
 def bloch_scan(phantom: Phantom, sequence: Sequence | str = "T2", b0: float = 1.5, voxel: float = 0.4e-3,
                snr: float = 40.0, texture: float = 0.02, rng: np.random.Generator | None = None, *,
                matrix: tuple[int, int] | None = None, fov: tuple[float, float] | None = None,
-               bandwidth: float = 130.0, readout: str = "x", mode: str = "steady",
-               backend: str = "auto") -> BlochImage:
+               bandwidth: float = 130.0, readout: str = "x", physics: BlochPhysics | None = None,
+               mode: str = "steady", backend: str = "auto") -> BlochImage:
     """Imagen de RM 2D del corte con el simulador de Bloch espacial.
 
     Los cuatro primeros argumentos y ``snr``, ``texture`` y ``rng`` son los
@@ -755,10 +871,12 @@ def bloch_scan(phantom: Phantom, sequence: Sequence | str = "T2", b0: float = 1.
     entre ``voxel``), ``fov = (fov_z, fov_x)`` en m (por defecto, el fantoma
     entero; centrado en él si es menor, y lo que quede fuera se pliega).
     ``bandwidth``: Hz/píxel de la lectura; ``readout``: su dirección ("x" o
-    "z"). Los ejes siguen el convenio de ``mri_scan``: con el FOV por
+    "z"). ``physics``: artefactos incluidos (``BlochPhysics``; por defecto
+    todos). Los ejes siguen el convenio de ``mri_scan``: con el FOV por
     defecto los píxeles caen en ``x0 + i·W/nx``.
     """
     t0 = time.perf_counter()
+    physics = physics or BlochPhysics()
     g = phantom.grid
     seq = resolve(sequence, b0)
     rng = rng or np.random.default_rng(0)
@@ -769,7 +887,13 @@ def bloch_scan(phantom: Phantom, sequence: Sequence | str = "T2", b0: float = 1.
     dz_img, dx_img = fov_z / nz, fov_x / nx
     x_first = g.x0 + (g.width - fov_x) / 2
     z_first = g.z0 + (g.depth - fov_z) / 2
-    iso = phantom_isochromats(phantom, b0, texture, g.dx**2 / (dz_img * dx_img))
+    if physics.fat_model not in FAT_PEAKS:
+        raise ValueError(f"modelo de grasa desconocido '{physics.fat_model}' (use {', '.join(FAT_PEAKS)})")
+    field_hz = field_map_hz(phantom, b0, physics)
+    t_field = time.perf_counter()
+    iso = phantom_isochromats(phantom, b0, texture, g.dx**2 / (dz_img * dx_img), physics.chemical_shift,
+                              FAT_PEAKS[physics.fat_model], field_hz if physics.susceptibility else None,
+                              _coil_map(phantom, physics.coil), physics.t2_prime)
     t1 = time.perf_counter()
     if readout == "x":
         cseq = cartesian_sequence(seq, b0, (nz, nx), (fov_z, fov_x), bandwidth, "x")
@@ -792,6 +916,8 @@ def bloch_scan(phantom: Phantom, sequence: Sequence | str = "T2", b0: float = 1.
     z = z_first + np.arange(nz) * dz_img
     extent = ((x[0] - dx_img / 2) * 1e3, (x[-1] + dx_img / 2) * 1e3, (z[-1] + dz_img / 2) * 1e3,
               (z[0] - dz_img / 2) * 1e3)
-    timings = {"isocromatos": t1 - t0, "simulacion": t2 - t1, "total": time.perf_counter() - t0}
+    timings = {"campo": t_field - t0, "isocromatos": t1 - t_field, "simulacion": t2 - t1,
+               "total": time.perf_counter() - t0}
+    shift = FAT_PPM * 1e-6 * GAMMA_BAR * b0 / bandwidth
     return BlochImage(np.abs(img), ideal, seq, b0, dx_img, extent, snr, x, z, img, k, float(bandwidth), readout,
-                      iso.n, timings)
+                      iso.n, timings, field_hz, shift, physics)
