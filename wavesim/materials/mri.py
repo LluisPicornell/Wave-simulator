@@ -62,3 +62,18 @@ MRI: dict[str, MRIProps] = {
     "fascia": MRIProps(0.6, (700.0, 800.0), (12.0, 10.0), t2_prime_15=10.0),
     "periosteum": MRIProps(0.6, (800.0, 900.0), (15.0, 12.0), t2_prime_15=10.0),
 }
+
+
+# --------------------------------------------------------------------------
+# Datos para el simulador de Bloch espacial (``wavesim.mri.spatial``)
+# --------------------------------------------------------------------------
+#: Razón giromagnética del protón entre 2π (Hz/T), CODATA 2018.
+GAMMA_BAR = 42.577478518e6
+
+#: Fracción de la señal que procede de protones de grasa (saturación grasa,
+#: desplazamiento químico y susceptibilidad). Fascia y periostio: algo de
+#: grasa entre las láminas de colágeno (estimación).
+FAT_FRACTION: dict[str, float] = {
+    "fat": 0.95, "marrow": 0.85, "trabecular_bone": 0.6, "edema": 0.4, "skin": 0.1, "muscle": 0.03,
+    "fascia": 0.05, "periosteum": 0.02,
+}
