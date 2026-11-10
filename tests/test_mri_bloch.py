@@ -4,11 +4,16 @@ import numpy as np
 import pytest
 
 from wavesim.core.grid import Grid2D
-from wavesim.mri import bloch, mri_scan, spatial, tissue_signal
-from wavesim.mri.spatial import ADC, RF, Free, Isochromats, Spoil
+from wavesim.materials import TISSUES
+from wavesim.materials.mri import GAMMA_BAR, SUSCEPTIBILITY_PPM
+from wavesim.mri import bloch, mri_scan, signal, spatial, tissue_signal
+from wavesim.mri import susceptibility as sus
+from wavesim.mri.sequences import Sequence
+from wavesim.mri.spatial import ADC, RF, BlochPhysics, Free, Isochromats, Spoil, SurfaceCoil
 from wavesim.phantoms.phantom import TISSUE_INDEX, Phantom
 
 GRID = Grid2D.from_size(8e-3, 8e-3, 0.5e-3, x0=-4e-3, z0=-4e-3)
+NONE = BlochPhysics.none()
 
 
 def uniform(tissue: str, grid: Grid2D = GRID, porosity: float | None = None, fill: str = "blood") -> Phantom:
@@ -47,7 +52,8 @@ def test_rect_pulse_off_resonance_follows_rabi_formula():
 @pytest.mark.parametrize("tissue", ["muscle", "fat", "marrow", "edema", "hematoma"])
 def test_uniform_phantom_matches_signal_equation(seq, tissue):
     # Sin artefactos (sin desplazamiento químico ni B0), la imagen de un tejido uniforme es su señal analítica
-    im = spatial.bloch_scan(uniform(tissue), seq, 1.5, snr=0, texture=0, matrix=(16, 16), backend="numpy")
+    im = spatial.bloch_scan(uniform(tissue), seq, 1.5, snr=0, texture=0, matrix=(16, 16), physics=NONE,
+                            backend="numpy")
     np.testing.assert_allclose(im.magnitude, tissue_signal(tissue, seq, 1.5), rtol=1e-9, atol=1e-12)
 
 
@@ -57,7 +63,7 @@ def test_porous_cells_follow_linear_mri_mixing(tissue, phi, fill):
     p = uniform(tissue, porosity=phi, fill=fill)
     sig = {k: tissue_signal(k, "PD", 1.5) for k in p.property_tissues()}
     ref = p.property_map(lambda k: sig[k], physics="mri")
-    im = spatial.bloch_scan(p, "PD", 1.5, snr=0, texture=0, matrix=(16, 16), backend="numpy")
+    im = spatial.bloch_scan(p, "PD", 1.5, snr=0, texture=0, matrix=(16, 16), physics=NONE, backend="numpy")
     np.testing.assert_allclose(im.magnitude, ref, rtol=1e-9)
 
 
@@ -110,7 +116,11 @@ def test_bloch_axes_locate_a_block_like_mri_scan(readout):
     lab[blk] = TISSUE_INDEX["water"]
     p = Phantom(g, lab)
     an = mri_scan(p, "PD", voxel=0.5e-3, snr=0, texture=0)
-    im = mri_scan(p, "PD", voxel=0.5e-3, snr=0, texture=0, engine="bloch", readout=readout, backend="numpy")
+    # Sin T2' (que atenúa los extremos del k-space durante la lectura y suaviza el Gibbs) y con el T2
+    # de 2 s del agua, la imagen de Bloch debe ser la del k-space recortado del modo analítico
+    flat = BlochPhysics(chemical_shift=False, susceptibility=False, t2_prime=False)
+    im = mri_scan(p, "PD", voxel=0.5e-3, snr=0, texture=0, engine="bloch", readout=readout, physics=flat,
+                  backend="numpy")
     assert im.magnitude.shape == an.magnitude.shape
     np.testing.assert_allclose(im.x, an.x, atol=1e-12)
     np.testing.assert_allclose(im.z, an.z, atol=1e-12)
@@ -119,10 +129,7 @@ def test_bloch_axes_locate_a_block_like_mri_scan(readout):
     cz = np.sum(mag.sum(axis=1) * im.z) / mag.sum()
     assert abs(cx - X[blk].mean()) < 0.25 * im.voxel
     assert abs(cz - Z[blk].mean()) < 0.25 * im.voxel
-    # Dentro del bloque coincide con el modo analítico; en los bordes no del todo: el desfase T2'
-    # durante la lectura (exp(-|t - TE|/T2')) atenúa los extremos del k-space y suaviza el Gibbs
-    inner = (np.abs(im.x[None, :] - 1e-3) < 2e-3) & (np.abs(im.z[:, None] - 10e-3) < 2e-3)
-    np.testing.assert_allclose(mag[inner], an.magnitude[inner], rtol=1e-2)
+    assert np.abs(mag - an.magnitude).max() < 3e-3 * an.magnitude.max()
 
 
 def test_noise_level_matches_requested_snr():
@@ -144,3 +151,143 @@ def test_infeasible_timing_and_unknown_engine_raise():
         spatial.cartesian_sequence("GRE", 1.5, (16, 16), (8e-3, 8e-3), bandwidth=50.0)
     with pytest.raises(ValueError, match="motor"):
         mri_scan(uniform("muscle"), engine="koma")
+
+
+# --------------------------------------------------------------------------
+# Física de los artefactos
+# --------------------------------------------------------------------------
+def test_susceptibility_table_covers_every_tissue():
+    assert set(TISSUES) <= set(SUSCEPTIBILITY_PPM)
+    assert SUSCEPTIBILITY_PPM["water"] == -9.05 and SUSCEPTIBILITY_PPM["air"] == 0.36
+    # Orden físico: hueso más diamagnético que el agua, grasa menos, aire paramagnético
+    assert SUSCEPTIBILITY_PPM["cortical_bone"] < SUSCEPTIBILITY_PPM["muscle"] < SUSCEPTIBILITY_PPM["fat"] < 0
+
+
+def _circular_centroid(img: np.ndarray) -> float:
+    """Centroide (píxeles) a lo largo de las columnas por la fase del primer armónico respecto del DC.
+
+    Para un objeto simétrico de banda limitada desplazado es exacto, también con desplazamientos sub-píxel.
+    """
+    n = img.shape[1]
+    h1 = (img * np.exp(-2j * np.pi * np.arange(n) / n)[None, :]).sum()
+    return (-np.angle(h1 / img.sum()) * n / (2 * np.pi)) % n
+
+
+@pytest.mark.parametrize("b0, bw", [(1.5, 130.0), (3.0, 260.0), (1.5, 80.0)])
+def test_fat_chemical_shift_equals_df_over_bandwidth(b0, bw):
+    n, fov = 32, 16e-3
+    c = -fov / 2 + (np.arange(2 * n) + 0.5) * fov / (2 * n)
+    X, Z = np.meshgrid(c, c)
+    blk = (np.abs(X) < 3e-3) & (np.abs(Z) < 3e-3)
+    seq = Sequence("SE", "SE", tr=500.0, te=30.0)
+    cseq = spatial.cartesian_sequence(seq, b0, (n, n), (fov, fov), bw, "x")
+    origin = (-fov / 2 + fov / n / 2,) * 2
+    cen = {}
+    for name, ppm in (("agua", 0.0), ("grasa", -3.4)):
+        iso = Isochromats(X[blk], Z[blk], 1.0, 0.3, 1e3, 0.0, 2 * np.pi * ppm * 1e-6 * GAMMA_BAR * b0)
+        img = spatial.reconstruct(spatial.acquire(iso, cseq, "steady", "numpy"), cseq, origin)
+        cen[name] = _circular_centroid(img), np.sum(np.abs(img).sum(0) * np.arange(n)) / np.abs(img).sum()
+    expected = -3.4e-6 * GAMMA_BAR * b0 / bw
+    assert cen["grasa"][0] - cen["agua"][0] == pytest.approx(expected, abs=0.01)
+    assert cen["grasa"][1] - cen["agua"][1] == pytest.approx(expected, abs=0.2)  # lo que se ve en la magnitud
+    im = spatial.bloch_scan(uniform("fat"), seq, b0, snr=0, matrix=(16, 16), bandwidth=bw)
+    assert im.fat_shift_px == pytest.approx(expected)
+
+
+def _offset_phantom(offsets_hz: np.ndarray, weights: np.ndarray, r2p: float = 0.0) -> Isochromats:
+    X, Z = GRID.meshgrid()
+    k = offsets_hz.size
+    return Isochromats(np.repeat(X.ravel(), k), np.repeat(Z.ravel(), k), np.tile(weights, X.size), 1.0, 0.05,
+                       r2p, 2 * np.pi * (37.0 + np.tile(offsets_hz, X.size)))
+
+
+def _uniform_value(iso: Isochromats, seq: Sequence) -> float:
+    cseq = spatial.cartesian_sequence(seq, 1.5, (16, 16), (8e-3, 8e-3), 1000.0)
+    img = spatial.reconstruct(spatial.acquire(iso, cseq, "steady", "numpy"), cseq, (-4e-3, -4e-3))
+    return float(np.abs(img).mean() * img.size / GRID.nx / GRID.nz)
+
+
+@pytest.mark.parametrize("te", [4.0, 12.0, 30.0])
+def test_spin_echo_refocuses_and_gre_decays_with_the_offset_distribution(te):
+    t1, t2 = 1000.0, 50.0
+    hwhm = 25.0  # Hz: T2' = 1/(2π·25 Hz) = 6.4 ms
+    nodes, w = np.polynomial.hermite_e.hermegauss(48)
+    sigma = 15.0
+    cases = {
+        # Lorentziana exacta (estados de desfase) -> exp(-TE/T2')
+        "lorentz": (_offset_phantom(np.zeros(1), np.ones(1), 2 * np.pi * hwhm), np.exp(-2 * np.pi * hwhm * te * 1e-3)),
+        # Gaussiana con cuadratura de Gauss-Hermite -> exp(-(2π σ TE)²/2)
+        "gauss": (_offset_phantom(sigma * nodes, w / w.sum()), np.exp(-0.5 * (2 * np.pi * sigma * te * 1e-3) ** 2)),
+    }
+    se = Sequence("SE", "SE", tr=200.0, te=te)
+    gre = Sequence("GRE", "GRE", tr=200.0, te=te, flip_deg=30.0)
+    for iso, decay in cases.values():
+        # Espín-eco: la señal no depende del desvío (37 Hz global) ni de su dispersión
+        assert _uniform_value(iso, se) == pytest.approx(float(signal(1.0, t1, t2, t2, se)), rel=1e-9)
+        assert _uniform_value(iso, gre) == pytest.approx(float(signal(1.0, t1, t2, t2, gre)) * decay, rel=1e-9)
+
+
+def test_dipole_field_of_a_cylinder_perpendicular_to_b0():
+    n, a = 128, 16.0
+    sub = (np.arange(8) + 0.5) / 8 - 0.5
+    c = np.arange(n) - n / 2 + 0.5
+    frac = ((c[None, :, None, None] + sub[None, None, None, :]) ** 2
+            + (c[:, None, None, None] + sub[None, None, :, None]) ** 2 <= a**2).mean(axis=(2, 3))
+    X, Z = np.meshgrid(c, c)
+    far = np.abs(np.hypot(X, Z) - a) > 2  # fuera de la escalera del borde
+    for direction in ("z", "x"):
+        err = np.abs(sus.dipole_field(frac + sus.CHI_WATER, direction) - sus.cylinder_field(X, Z, a, 1.0, direction))
+        assert err[far].max() < 0.01 * 0.5  # < 1 % de Δχ/2 (se mide 0.64 %)
+    # B0 oblicuo a la malla: la escalera del borde deja estrías que decaen despacio (5 % a 2-4 celdas
+    # del borde); el error cuadrático medio sigue siendo pequeño
+    err = sus.dipole_field(frac + sus.CHI_WATER, (1.0, 0.0, 1.0)) - sus.cylinder_field(X, Z, a, 1.0, (1, 0, 1))
+    assert np.sqrt(np.mean(err[far] ** 2)) < 0.01 * 0.5
+    # B0 perpendicular al corte: sólo el desplazamiento de Lorentz Δχ/3 dentro, nada fuera
+    f = sus.dipole_field(frac + sus.CHI_WATER, "y")
+    np.testing.assert_allclose(f, frac / 3.0, atol=1e-12)
+
+
+def test_auto_b0_direction_follows_bore_geometry():
+    ph = BlochPhysics()
+    assert ph.direction(Phantom(GRID, np.zeros(GRID.shape, np.int16), meta={"view": "cross_section"})) == "y"
+    assert ph.direction(Phantom(GRID, np.zeros(GRID.shape, np.int16), meta={"view": "longitudinal"})) == "x"
+    assert BlochPhysics(b0_direction="z").direction(uniform("muscle")) == "z"
+
+
+def test_gre_loses_signal_near_air_but_spin_echo_does_not():
+    g = Grid2D.from_size(32e-3, 32e-3, 0.25e-3, x0=-16e-3, z0=-16e-3)
+    X, Z = g.meshgrid()
+    lab = np.full(g.shape, TISSUE_INDEX["muscle"], np.int16)
+    lab[np.hypot(X, Z) < 4e-3] = TISSUE_INDEX["air"]
+    p = Phantom(g, lab)
+    ratios = {}
+    for name, seq in (("SE", "PD"), ("GRE", Sequence("GRE", "GRE", tr=50.0, te=15.0, flip_deg=20.0))):
+        with_b0 = spatial.bloch_scan(p, seq, snr=0, texture=0, matrix=(64, 64),
+                                     physics=BlochPhysics(chemical_shift=False, b0_direction="z"))
+        ref = spatial.bloch_scan(p, seq, snr=0, texture=0, matrix=(64, 64), physics=NONE)
+        xi, zi = np.meshgrid(with_b0.x, with_b0.z)
+        # Región que incluye el hueco: la distorsión mueve señal pero en espín-eco no la destruye
+        region = np.hypot(xi, zi) < 8e-3
+        ratios[name] = with_b0.magnitude[region].sum() / ref.magnitude[region].sum()
+    assert ratios["SE"] == pytest.approx(1.0, abs=0.02)
+    assert ratios["GRE"] < 0.9
+
+
+def test_fat_saturation_misses_fat_shifted_by_b0():
+    p = uniform("fat")
+    cseq = spatial.cartesian_sequence("PD_FS", 1.5, (16, 16), (8e-3, 8e-3))
+    vals = []
+    for off in (0.0, 120.0):  # la banda de saturación es de ±1 ppm (±64 Hz a 1.5 T)
+        iso = spatial.phantom_isochromats(p, 1.5, 0.0, 1.0, field_hz=np.full(GRID.shape, off))
+        vals.append(np.abs(spatial.reconstruct(spatial.acquire(iso, cseq), cseq, (-4e-3, -4e-3))).mean())
+    assert vals[0] == pytest.approx(tissue_signal("fat", "PD_FS"), rel=1e-9)
+    assert vals[1] == pytest.approx(tissue_signal("fat", "PD"), rel=1e-9)  # grasa sin saturar
+
+
+def test_surface_coil_weights_the_image():
+    coil = SurfaceCoil((0.0, -6e-3), 5e-3)
+    im = spatial.bloch_scan(uniform("muscle"), "PD", snr=0, texture=0, matrix=(16, 16),
+                            physics=BlochPhysics(coil=coil), backend="numpy")
+    xi, zi = np.meshgrid(im.x, im.z)
+    ref = tissue_signal("muscle", "PD") * coil.sensitivity(xi, zi)
+    assert np.abs(im.magnitude - ref).max() < 0.03 * ref.max()
