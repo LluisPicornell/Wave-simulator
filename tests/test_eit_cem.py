@@ -3,8 +3,13 @@
 import numpy as np
 import pytest
 
-from wavesim.em import QuasiStaticSolver, quasistatic, ring_electrodes, sensitivity_matrix, simulate_eit
-from wavesim.em.eit import disc_cem_series, disc_point_voltage
+from wavesim.em import (
+    QuasiStaticSolver, Sensitivity, quasistatic, reconstruct_difference, ring_electrodes, sensitivity_matrix,
+    simulate_eit,
+)
+from wavesim.em.eit import (
+    EITModel, add_noise, disc_cem_series, disc_point_voltage, gauss_newton, greit_metrics, lcurve_regularization,
+)
 
 from test_quasistatic import _disc
 
@@ -131,3 +136,62 @@ def test_cem_jacobian_matches_finite_difference_including_contact_cells():
         k = int(sens.to_image(np.arange(sens.active.sum()), fill=-1)[j0 // 5, i0 // 5])
         measured = pert.voltages - base.voltages
         assert np.abs(sens.matrix[:, k] * eps - measured).max() < 0.01 * np.abs(measured).max()
+
+
+# --------------------------------------------------------------------------
+# Reconstrucción
+# --------------------------------------------------------------------------
+INC = (8e-3, 5e-3, 4e-3, "blood")
+
+
+@pytest.fixture(scope="module")
+def inverse_problem():
+    """Datos en malla de 0.5 mm con CEM y ruido de 70 dB; modelo de reconstrucción en 1 mm (sin crimen inverso)."""
+    z_c = 0.02
+    f0, f1 = _disc(0.5e-3, R), _disc(0.5e-3, R, inclusion=INC)
+    elf = ring_electrodes(f0, 16, 3e-3)
+    v0 = simulate_eit(QuasiStaticSolver(f0, F), elf, CURRENT, contact_impedance=z_c).voltages
+    v1 = simulate_eit(QuasiStaticSolver(f1, F), elf, CURRENT, contact_impedance=z_c).voltages
+    rng = np.random.default_rng(1)
+    v0n, v1n = add_noise(v0, 70.0, rng), add_noise(v1, 70.0, rng)
+    rec = _disc(1e-3, R)
+    model = EITModel(rec, F, ring_electrodes(rec, 16, 3e-3), factor=3, current=CURRENT, contact_impedance=z_c)
+    x, z = rec.grid.meshgrid()
+    contrast = quasistatic.admittivity("blood", F).real / quasistatic.admittivity("muscle", F).real - 1.0
+    truth = np.where(np.hypot(x - INC[0], z - INC[1]) <= INC[2], contrast, 0.0)
+    return model, v0n, v1n, truth
+
+
+def test_gauss_newton_beats_one_step_in_position_and_amplitude(inverse_problem):
+    model, v0, v1, truth = inverse_problem
+    g = model.phantom.grid
+    _, jac = model.forward(np.zeros(model.n_params), jacobian=True)
+    sens = Sensitivity(jac, model._coarse_shape, model.factor, model.active)
+    one = np.where(model.tissue, model.to_fine(reconstruct_difference(sens, v1 - v0, 1e-2)), 0.0)
+    gn = gauss_newton(model, v1, "noser", 3e-2, n_iter=8, data_ref=v0)
+    m1 = greit_metrics(one, truth, model.tissue, g)
+    m2 = greit_metrics(gn.image(), truth, model.tissue, g)
+    assert gn.cost[-1] < 0.2 * gn.cost[0]  # el ajuste mejora de verdad
+    assert m2.position_error < 2e-3
+    assert abs(m2.amplitude - 1.0) < abs(m1.amplitude - 1.0)  # el paso lineal subestima el contraste
+    assert abs(m2.amplitude - 1.0) < 0.3
+
+
+@pytest.mark.parametrize("reg", ["tikhonov", "laplaciano", "tv"])
+def test_other_regularizers_also_locate_the_inclusion(inverse_problem, reg):
+    model, v0, v1, truth = inverse_problem
+    gn = gauss_newton(model, v1, reg, 1e-2, n_iter=4, data_ref=v0)
+    m = greit_metrics(gn.image(), truth, model.tissue, model.phantom.grid)
+    assert m.position_error < 4e-3 and 0.4 < m.amplitude < 1.6
+
+
+def test_lcurve_picks_interior_corner_and_greit_metrics_are_exact_on_perfect_image(inverse_problem):
+    model, v0, v1, truth = inverse_problem
+    _, jac = model.forward(np.zeros(model.n_params), jacobian=True)
+    jr = np.vstack([jac.real, jac.imag])
+    r = np.concatenate([(v1 - v0).real, (v1 - v0).imag])
+    lam, curve = lcurve_regularization(jr, r, np.diag(np.diag(jr.T @ jr)))
+    assert curve["lams"][0] < lam < curve["lams"][-1]
+    m = greit_metrics(truth, truth, model.tissue, model.phantom.grid)
+    assert m.position_error < 1e-9 and m.amplitude == pytest.approx(1.0) and m.ringing == 0.0
+    assert m.shape_deformation < 0.15  # un disco rasterizado cabe casi en el círculo de igual área

@@ -296,12 +296,13 @@ def discrepancy_regularization(jac: np.ndarray, resid: np.ndarray, reg: np.ndarr
 
     ``noise_norm`` es la norma esperada del ruido en el vector apilado (Re, Im)
     (``sigma sqrt(n_datos_reales)``). Si ni el menor ``lam`` alcanza el nivel de
-    ruido se devuelve ése (el ajuste no puede ser mejor).
+    ruido (error de modelo mayor que el ruido, lo normal con mallas distintas)
+    devuelve ``nan``: ``gauss_newton`` recurre entonces a la curva L.
     """
     lams = np.logspace(-10, 2, 49) if lams is None else np.asarray(lams, dtype=float)
     hess = jac.T @ jac
     rhs = jac.T @ resid
-    best = float(lams[0])
+    best = float("nan")
     for lam in lams:
         d = np.linalg.solve(hess + lam * reg, rhs)
         if np.linalg.norm(resid - jac @ d) <= tau * noise_norm:
@@ -327,10 +328,10 @@ class GNResult:
         return self.model.relative_change_image(self.p)
 
 
-def gauss_newton(model: EITModel, data: np.ndarray, reg: str = "noser", lam: float | str = 1e-2,
+def gauss_newton(model: EITModel, data: np.ndarray, reg: str = "noser", lam: float | str = 3e-2,
                  n_iter: int = 8, p0: np.ndarray | None = None, data_ref: np.ndarray | None = None,
                  noise_std: float | None = None, tv_beta: float = 1e-2, tau: float = 1.05,
-                 tol: float = 1e-3, p_ref: np.ndarray | None = None) -> GNResult:
+                 tol: float = 5e-2, p_ref: np.ndarray | None = None) -> GNResult:
     """Reconstrucción por Gauss-Newton regularizado con el jacobiano recalculado en cada iteración.
 
     Minimiza ``|W (data - F(p))|² + lam · pen(p - p_ref)`` con ``F`` el modelo
@@ -344,8 +345,11 @@ def gauss_newton(model: EITModel, data: np.ndarray, reg: str = "noser", lam: flo
     - Imagen de diferencias: pasar ``data_ref`` (la medida de referencia); el objetivo pasa a ser
       ``F(p0) + (data - data_ref)``, que cancela buena parte del error de modelo (posición de
       electrodos, geometría) igual que en EIDORS.
+    - ``lam`` por defecto 3e-2: con 1e-2 y NOSER el ajuste a datos con error de modelo oscila entre iteraciones
+      (un píxel caliente), medido en el disco de ``docs/validacion/eit.md``.
     - ``lam`` numérico, ``"lcurve"`` (esquina de la curva L del primer paso, fijo después) o
-      ``"discrepancy"`` (Morozov en cada iteración; requiere ``noise_std``; para si ``|r| <= tau · ruido``).
+      ``"discrepancy"`` (Morozov en cada iteración; requiere ``noise_std``; para si ``|r| <= tau · ruido``;
+      si el error de modelo impide llegar al ruido, usa la curva L).
     """
     p = np.zeros(model.n_params) if p0 is None else np.asarray(p0, dtype=float).copy()
     p_ref = np.zeros_like(p) if p_ref is None else np.asarray(p_ref, dtype=float)
@@ -373,6 +377,8 @@ def gauss_newton(model: EITModel, data: np.ndarray, reg: str = "noser", lam: flo
                 if noise_norm is None:
                     raise ValueError("lam='discrepancy' necesita noise_std")
                 lam_cur = discrepancy_regularization(jr, r, rmat, noise_norm, tau)
+                if not np.isfinite(lam_cur):  # el residuo no puede bajar al nivel de ruido: curva L
+                    lam_cur, lcurve = lcurve_regularization(jr, r, rmat)
             else:
                 raise ValueError(f"lam desconocido: {lam}")
         c, rn = cost_of(v, p)
@@ -384,7 +390,7 @@ def gauss_newton(model: EITModel, data: np.ndarray, reg: str = "noser", lam: flo
         step = np.linalg.solve(jr.T @ jr + lam_cur * rmat, jr.T @ r - lam_cur * rmat @ (p - p_ref))
         alpha, accepted = 1.0, False
         for _ in range(6):
-            p_new = p + alpha * step
+            p_new = np.clip(p + alpha * step, -4.0, 4.0)  # evita admitividades absurdas en pasos grandes
             v_new, _ = model.forward(p_new)
             c_new, _ = cost_of(v_new, p_new)
             if c_new < c:
