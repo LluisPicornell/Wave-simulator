@@ -58,7 +58,7 @@ def analytic():
     print("Electrodos ideales frente a electrodos puntuales (fórmula cerrada):\n")
     print("| dx (mm) | ancho electrodo (mm) | error máx. por dato (%) | error de la norma (%) |")
     print("|---|---|---|---|")
-    cases = ((1e-3, 2e-3), (0.5e-3, 2e-3), (0.5e-3, 1e-3), (0.25e-3, 1e-3), (0.25e-3, 2e-3))
+    cases = ((2e-3, 2e-3), (1e-3, 2e-3), (0.5e-3, 2e-3), (0.5e-3, 1e-3))
     for dx, wd in cases:
         d = disc(dx)
         el = ring_electrodes(d, 16, wd)
