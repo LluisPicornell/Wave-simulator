@@ -31,13 +31,25 @@ class MRIImage:
 
 
 def mri_scan(phantom: Phantom, sequence: Sequence | str = "T2", b0: float = 1.5, voxel: float = 0.4e-3,
-             snr: float = 40.0, texture: float = 0.02, rng: np.random.Generator | None = None) -> MRIImage:
+             snr: float = 40.0, texture: float = 0.02, rng: np.random.Generator | None = None,
+             engine: str = "analytic", **bloch_options) -> MRIImage:
     """Imagen de RM 2D del corte del fantoma.
 
     ``voxel``: resolución en el plano (m); debe ser ≥ dx del fantoma.
     ``snr``: relación señal/ruido en el músculo.
     ``texture``: variación aleatoria de la señal dentro de cada tejido.
+    ``engine``: ``"analytic"`` (por defecto: ecuación de señal por tejido y
+    k-space recortado) o ``"bloch"`` (simulador de Bloch espacial,
+    ``spatial.bloch_scan``, al que se pasan ``bloch_options``).
     """
+    if engine == "bloch":
+        from .spatial import bloch_scan
+
+        return bloch_scan(phantom, sequence, b0, voxel, snr, texture, rng, **bloch_options)
+    if engine != "analytic":
+        raise ValueError(f"motor de RM desconocido '{engine}' (use 'analytic' o 'bloch')")
+    if bloch_options:
+        raise TypeError(f"opciones sólo válidas con engine='bloch': {', '.join(bloch_options)}")
     seq = resolve(sequence, b0)
     rng = rng or np.random.default_rng(0)
     g = phantom.grid
