@@ -45,13 +45,38 @@ def discrete_wavenumber(omega, c: float, dx: float, dt: float):
     """
     omega = np.asarray(omega, dtype=float)
     rhs = np.sin(omega * dt / 2.0) * dx / (c * dt)
-    k = omega / c
+    return _invert_stencil(rhs, omega / c, dx)
+
+
+def _stencil(k, dx):
+    """Símbolo del operador escalonado de 4.º orden por ``dx/2``: ``C1 sin(k dx/2) + C2 sin(3 k dx/2)``."""
+    return C1 * np.sin(k * dx / 2.0) + C2 * np.sin(1.5 * k * dx)
+
+
+def _invert_stencil(rhs, k0, dx):
+    """``k`` con ``_stencil(k, dx) = rhs`` por Newton desde ``k0`` (complejo si ``rhs`` lo es)."""
+    k = np.asarray(k0) + 0 * np.asarray(rhs)
     for _ in range(60):
         th = k * dx / 2.0
-        f = C1 * np.sin(th) + C2 * np.sin(3.0 * th) - rhs
         df = (C1 * np.cos(th) + 3.0 * C2 * np.cos(3.0 * th)) * dx / 2.0
-        k = k - f / df
+        k = k - (_stencil(k, dx) - rhs) / df
     return k
+
+
+def discrete_kz(omega, kx, c: float, dx: float, dt: float):
+    """``kz`` de una onda plana del esquema con número de onda horizontal ``kx`` (exacto en la malla).
+
+    Relación de dispersión 2D: ``[sin(w dt/2)/(c dt/2)]² = Kx² + Kz²`` con
+    ``K(k) = (2/dx) [C1 sin(k dx/2) + C2 sin(3k dx/2)]``. Complejo (Im > 0)
+    para ondas evanescentes.
+    """
+    omega, kx = np.asarray(omega, dtype=float), np.asarray(kx, dtype=float)
+    big_k = 2.0 * np.sin(omega * dt / 2.0) / (c * dt)
+    kx_s = 2.0 / dx * _stencil(kx, dx)
+    kz_s = np.sqrt(np.asarray(big_k**2 - kx_s**2, dtype=complex))
+    kz0 = np.sqrt(np.asarray((omega / c) ** 2 - kx**2, dtype=complex))
+    kz = _invert_stencil(kz_s * dx / 2.0, kz0, dx)
+    return np.where(np.imag(kz) < 0, -kz, kz)
 
 
 # ----------------------------------------------------------------------------

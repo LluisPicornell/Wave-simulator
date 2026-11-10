@@ -189,3 +189,47 @@ def test_reflexion_normal_agua_cortical_converge_a_segundo_orden():
     assert abs(rows[-1]["eR"]) < 3e-3 and abs(rows[-1]["eT"]) < 3e-3
     # la interfaz efectiva está en la fila de nodos vz (media celda entre las filas de tensión)
     assert abs(rows[-1]["delta"]) < 0.01
+
+
+# ----------------------------------------------------------------------------
+# U4: R(θ) agua-cortical
+# ----------------------------------------------------------------------------
+def test_angulo_critico_p_y_reflexion_total_pasado_el_critico_s():
+    th_p, th_s = (np.degrees(a) for a in an.critical_angles(1500.0, 3500.0, 1800.0))
+    r = ev.beam_reflection(th_p, ppw=10, dtheta=3.0, n_theta=61, freqs=(1e6,))
+    assert ev.critical_angle_from_peak(r)[0] == pytest.approx(th_p, abs=1.0)
+    # pasado el crítico S la reflexión es total y su fase, compleja, sigue a la exacta
+    r = ev.beam_reflection(62.0, ppw=10, dtheta=2.0, n_theta=9, freqs=(1e6,))
+    a = ev.r_theta_analytic(r["theta"])
+    assert np.abs(np.abs(r["R"]) - 1).max() < 0.03
+    assert np.degrees(np.abs(np.angle(r["R"] / a.R))).max() < 8.0  # ~6° a 10 ppw, ~3° a 15
+
+
+def test_onda_s_transmitida_y_numba_igual_a_numpy():
+    ra, rb = (ev.beam_reflection(40.0, ppw=8, dtheta=2.0, n_theta=9, freqs=(1e6,), backend=b)
+              for b in ("auto", "numpy"))
+    assert np.abs(ra["R"] - rb["R"]).max() < 1e-4 * np.abs(rb["R"]).max()
+    a = ev.r_theta_analytic(ra["theta"])
+    assert np.abs(ra["vs"] / a.vs - 1).max() < 0.02  # conversión P -> S en la interfaz
+    assert np.abs(np.abs(ra["R"]) / np.abs(a.R) - 1).max() < 0.02
+
+
+# ----------------------------------------------------------------------------
+# U5: ondas de Lamb en una placa de cortical de 3 mm
+# ----------------------------------------------------------------------------
+def test_lamb_placa_en_agua_sigue_la_dispersion_con_carga_de_fluido():
+    freqs = np.array([150e3, 200e3, 250e3, 300e3])
+    r = ev.lamb_case(ev.WATER, dx=0.25e-3, freqs=freqs, length=100e-3, t_end=150e-6)
+    assert np.abs(r["S"]["c"] / r["S"]["c_ref"] - 1).max() < 0.01
+    assert np.abs(r["A"]["c"] / r["A"]["c_ref"] - 1).max() < 0.02
+    # el agua frena A0 un ~15 %: la simulación sigue la curva con carga de fluido, no la de la placa libre
+    assert np.all(r["A"]["c_free"] / r["A"]["c_ref"] > 1.12)
+    assert r["sim"]["finite"] and r["sim"]["final"] < r["sim"]["peak"]
+
+
+def test_lamb_placa_libre_en_aire_es_estable_y_sigue_rayleigh_lamb():
+    freqs = np.array([150e3, 200e3, 250e3, 300e3])
+    r = ev.lamb_case(ev.AIR, dx=0.25e-3, freqs=freqs, length=100e-3, t_end=150e-6)
+    assert r["sim"]["finite"] and r["sim"]["final"] < r["sim"]["peak"]
+    assert np.abs(r["S"]["c"] / r["S"]["c_ref"] - 1).max() < 0.03  # 12 celdas en el espesor
+    assert np.abs(r["A"]["c"] / r["A"]["c_ref"] - 1).max() < 0.03
