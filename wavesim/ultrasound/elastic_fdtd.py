@@ -156,7 +156,7 @@ class ElasticSolver:
         phantom: Phantom,
         f0: float,
         npml: int = 20,
-        n_mechanisms: int = 1,
+        n_mechanisms: int = 2,
         scattering: float = 1.0,
         attenuation: bool = True,
         cfl: float = 0.9,
