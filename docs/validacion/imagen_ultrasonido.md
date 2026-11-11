@@ -76,3 +76,28 @@ Con una capa de 11 mm la mejora sobre 1540 es real pero modesta (0.50 → 0.19 m
 
 ## Coste (malla 400×320, 1 hilo): ~3 s por emisión; onda plana 3 s, STA de 46 elementos 138 s, focalizada de 46 líneas 153 s.
 
+
+## Tibia a 3 MHz (24×22 mm): fractura desplazada y fisura (`--parte fractura --rapido`)
+
+STA con un elemento de cada 4 (17 emisiones; **no** es la STA completa de 70), ondas planas -8/0/+8°. Mismo fantoma y semilla en sana y fracturada.
+ROI = fractura + hematoma en profundidad aparente, dilatada 4 px. «Ruido» = cambio medio entre la sana y la misma sana con otro speckle (dB).
+Tiempo FDTD: 139 s (ondas planas) y 723 s (STA, 5 fantomas). Figura: `imagen_ultrasonido_fractura.png`.
+
+| Caso | Método | Cambio medio ROI (dB) | Ruido (dB) | CNR | Razón de energía |
+|---|---|---|---|---|---|
+| desplazada | PW×3 DAS | 10.4 | 1.7 | 6.05 | 0.17 |
+| desplazada | PW×3 CF | 9.1 | 0.2 | 44.85 | 0.14 |
+| desplazada | PW×3 DMAS | 9.8 | 0.8 | 11.79 | 0.15 |
+| desplazada | STA DAS | 11.0 | 1.9 | 5.92 | 0.19 |
+| desplazada | STA CF | 10.2 | 0.6 | 16.77 | 0.16 |
+| fisura | PW×3 DAS | 5.3 | 1.1 | 4.91 | 0.04 |
+| fisura | PW×3 CF | 3.4 | 0.3 | 10.89 | 0.03 |
+| fisura | PW×3 DMAS | 4.3 | 0.6 | 6.73 | 0.03 |
+| fisura | STA DAS | 5.2 | 1.3 | 3.97 | 0.04 |
+| fisura | STA CF | 3.5 | 0.5 | 7.63 | 0.02 |
+
+Lectura honesta: el **cambio absoluto** en la ROI no mejora con STA (11.0 frente a 10.4 dB, 5.2 frente a 5.3 dB) ni con CF (baja: 9.1 y 3.4 dB).
+El CNR sube con CF (fisura 4.9 → 10.9) sólo porque CF reduce el «ruido» entre realizaciones de speckle (0.2-0.3 dB); es un cociente sensible
+a esa estimación (una sola realización alternativa, imagen en dB recortada a 50 dB), por lo que no demuestra mejor detección. STA (submuestreada) no mejora sobre
+ondas planas compuestas en la fisura (3.97 frente a 4.91). Sin observador ni ruido electrónico, la conclusión prudente es: ninguna variante mejora de forma clara
+la visibilidad de la fisura de 0.15 mm; CF/DMAS podrían ayudar frente al speckle, a falta de más realizaciones.
