@@ -261,7 +261,7 @@ docs/           comparativa con otros simuladores y resultados de validación
 
 ## Validación
 
-`pytest` (417 tests, unos 4 min con 4 hilos de Numba) compara cada solver con
+`pytest` (460 tests, unos 4 min con 4 hilos de Numba) compara cada solver con
 soluciones analíticas y comprueba los fantomas y los datasets. Los benchmarks
 de `benchmarks/` repiten las comparaciones con más resolución y escriben sus
 tablas en [`docs/validacion/`](docs/validacion/) (un documento por tema, con
