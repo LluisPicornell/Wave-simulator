@@ -194,7 +194,8 @@ def test_medio_extruido_con_fuente_uniforme_en_y_reproduce_el_2d():
     ph = longitudinal_limb("tibia", Fracture(displacement=1e-3), width=8e-3, depth=14e-3, dx=1450 / f0 / 8)
     g = ph.grid
     nt = 500
-    s2 = ElasticSolver(ph, f0, npml=10, cfl=0.6, n_mechanisms=2, scattering=0.0)
+    # el 3D sólo tiene la CPML clásica: se compara con la misma capa (sin M-PML) en 2D
+    s2 = ElasticSolver(ph, f0, npml=10, cfl=0.6, n_mechanisms=2, scattering=0.0, pml_ratio=0.0)
     i = np.arange(g.nx // 3, g.nx // 3 + 3)
     j = np.full(i.size, 14)
     sig = gaussian_pulse(s2.time_axis(nt), f0)[None, :]
