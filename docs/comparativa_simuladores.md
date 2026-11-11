@@ -2,7 +2,44 @@
 
 Comparación de `wavesim` con los simuladores usados hoy en investigación y en
 la industria, modalidad por modalidad, más un plan de validación y una primera
-comparación numérica con k-Wave.
+comparación numérica con k-Wave. La descripción de los otros simuladores es la
+de la primera redacción; lo que se ha actualizado es el estado de wavesim tras
+una serie de mejoras dirigidas a cerrar las brechas que este documento
+señalaba, cada una con sus cifras medidas en [`validacion/`](validacion/).
+
+**Lectura honesta del conjunto:** se han cerrado o reducido varias brechas
+*de física y de método* (atenuación, interfaz fluido-sólido, ondas guiadas,
+Maxwell dispersivo, Monte Carlo óptico, scatter de rayos X, Bloch espacial,
+EIT con CEM y Gauss-Newton, ultrasonido 3D de dominio pequeño). **No** se han
+cerrado las de escala y de validación externa: wavesim sigue sin GPU, sin 3D de
+cuerpo entero, sin no linealidad acústica, sin física completa de partículas,
+sin validación revisada por pares y, salvo k-Wave en un caso antiguo y SpekPy
+en espectros de rayos X, **sin haber ejecutado ningún otro simulador** para
+compararlo directamente. Todas las verificaciones nuevas son frente a
+soluciones analíticas o a referencias internas.
+
+## Resumen: brecha → estado → evidencia
+
+| Brecha señalada | Estado | Evidencia medida |
+|---|---|---|
+| Atenuación por ley de potencia (US) | **Cerrada** en la banda del pulso; `n_mechanisms=2` por defecto | Error vs α₀·f^y ≤ 2 % en [0.5, 1.8]·f₀ (antes 14-97 % con 1 mecanismo); coste ×1.5. [atenuacion](validacion/atenuacion.md) |
+| Interfaz fluido-sólido oblicua (US) | **Corregida** (error real del solver) | \|R\| a 45°: 4.6 → 1.5 % (10 ppw), 2.3 → 0.4 % (20 ppw). [elastico](validacion/elastico.md) |
+| Ondas S, conversión de modo y ondas guiadas (U3-U5) | **Verificadas** frente a analítico, con excepciones | R(θ) ≤ 0.7 % hasta 22°, crítico P ±0.15°; Lamb S0/A0 ≤ 2 %. Fuera de tolerancia: \|R\| 4-5 % en bordes de zona y 9-17 % cerca de los críticos. [elastico](validacion/elastico.md) |
+| Cortical anisótropa (US) | **Cerrada, opcional** (`anisotropic_bone`, desactivada); c13 no verificado | qP/qSV vs Christoffel ≤ 0.1 %. [anisotropia](validacion/anisotropia.md) |
+| Inestabilidad de la CPML con ondas guiadas (US) | **Corregida** con M-PML automática | Sin crecimiento en 40 000 pasos; reflexión −28 dB (amplitud) en hueso, −53 dB en agua. [estabilidad](validacion/estabilidad.md) |
+| Sólo 2D (US) | **Parcialmente cerrada**: solver 3D de dominio pequeño | Velocidades ≤ 0.4 %; 2D extruido = 3D a ~1e-6; ~27 Mceldas·paso/s por hilo; sin M-PML, sin speckle ni porosidad. [elastico3d](validacion/elastico3d.md) |
+| Sonda realista, STA, formadores de haz (US) | **Cerrada** en la cadena; sin sondas reales ni no linealidad | Lateral ≤ 12 % de la teoría; **axial +9 a +17 % (no cumple 10 %)**; SNR de speckle 1.85 vs 1.91. [imagen_ultrasonido](validacion/imagen_ultrasonido.md) |
+| Maxwell de banda estrecha (EM) | **Cerrada**: Debye multipolo (ADE), banda ancha, Numba | Debye ≤ 0.7 %; β ≤ 0.23 %, α ≤ 1.6 %; losa ≤ 0.31 dB; Mie 1.7-3.3 %. Sigue 2D TM, sin antenas. [maxwell](validacion/maxwell.md) |
+| Monte Carlo óptico (óptica) | **Cerrada** (índice único por tejido) | van de Hulst ≤ 1.6 σ; Fresnel 1e-7; balístico ≤ 1.2 σ; la difusión da ×1.27 menos fluencia cerca de la piel. [optica](validacion/optica.md) |
+| Scatter, líneas K, abanico, iterativo, detector (rayos X) | **Parcialmente cerrada** | Abanico = paralelo; OS-SART −25-32 % de RMSE con 30-60 vistas; HVL vs SpekPy ±5 % a 80-120 kVp pero −6.6/−5.2 % a 50/70 kVp; sin cono 3D ni corrección de scatter. [rayos_x](validacion/rayos_x.md) |
+| RM: Bloch espacial y artefactos | **Cerrada** en 2D cartesiano | Señal vs analítico 1e-11 o mejor; desplazamiento químico exacto; cilindro de susceptibilidad ≤ 0.7 % (B0 alineado). Sin comparar con KomaMRI/JEMRIS. [rm](validacion/rm.md) |
+| EIT: CEM, Gauss-Newton, solver rápido | **Cerrada** en 2D; sin FEM, 3D ni GREIT | CEM vs Fourier ≤ 1.5 %; GN-TV 0.08 mm en el disco; multigrid 922 → 13-16 iteraciones. [eit](validacion/eit.md), [rendimiento_em](validacion/rendimiento_em.md) |
+| GPU y escala | **Abierta** | Sólo CPU (Numba). |
+| 3D de cuerpo entero, fantomas segmentados | **Abierta** | Anatomía paramétrica 2D (+ tibia tubular 3D). |
+| No linealidad acústica, terapia | **Abierta** | Acústica lineal. |
+| Física completa de partículas (GATE, MC-GPU) | **Abierta** | Scatter MC sin electrones ni fluorescencia. |
+| Comparación cruzada directa | **Abierta** (sólo k-Wave en el caso antiguo y SpekPy en espectros) | §10. |
+| Validación externa revisada por pares | **Abierta** | Toda la validación es interna. |
 
 ## 0. Cómo leer este documento (y qué no se pudo verificar)
 
@@ -20,39 +57,45 @@ comparación numérica con k-Wave.
   proxy). Los datos de esos proyectos proceden de fragmentos del buscador y de
   páginas espejo; por eso hay varias licencias en **[?]**.
 - **Versión de wavesim comparada.** El análisis se hizo sobre una versión
-  anterior y se actualizó después para incluir lo añadido en paralelo: el
-  solver cuasi-estático de impedancia eléctrica (`wavesim.em.quasistatic`), el
-  backend Numba opcional del solver elástico y las correcciones de la revisión
-  (transmisión EM coherente, contorno de Robin en óptica, speckle
-  independiente de la malla).
+  anterior. Las filas y apartados de wavesim se han reescrito para el estado
+  actual (atenuación por mecanismo, interfaz corregida, M-PML, anisotropía
+  opcional, solver 3D, cadena de imagen, Maxwell de banda ancha, Monte Carlo
+  óptico, rayos X ampliados, Bloch espacial y EIT con CEM y Gauss-Newton). Las
+  descripciones de los demás simuladores **no** se han vuelto a verificar.
+- **Cifras de wavesim.** Sólo las de `docs/validacion/*.md` o medidas al
+  escribir esta revisión (indicadas); las referencias bibliográficas que esos
+  documentos marcan como no verificadas siguen sin verificar.
 - **Fecha.** Noviembre de 2026. Versiones y licencias pueden haber cambiado.
 
 ## 1. Qué es wavesim (resumen honesto)
 
-Paquete Python + NumPy (Numba opcional en CPU, sin GPU), 2D, con un solo conjunto de
-fantomas de extremidad con fractura compartido por todas las modalidades:
+Paquete Python + NumPy (Numba opcional en CPU, sin GPU), casi todo 2D, con un
+solo conjunto de fantomas de extremidad con fractura compartido por todas las
+modalidades:
 
 | Modalidad | Qué resuelve realmente | Límites principales |
 |---|---|---|
-| Ultrasonido | FDTD elástico velocidad-tensión, 4.º orden en espacio, leapfrog de 2.º orden, CPML, atenuación GSLS con "método tau" (1 mecanismo por defecto, con hasta ~14 % de error frente a la ley ∝ f en la banda del pulso; ~1 % con 2 mecanismos), speckle por fluctuación de densidad, rugosidad de interfaces | 2D, CPU, float32, hueso isótropo, acústica lineal, tejidos blandos como fluido (`mu = 0`) |
-| Maxwell | FDTD de Yee 2D modo TM, CPML, onda continua y fasor por DFT, propiedades Cole-Cole (Gabriel 1996) a la frecuencia central, SAR | banda estrecha (sin dispersión dentro del pulso), 2D TM, sin antenas ni fuentes realistas |
-| Óptica | Difusión estacionaria (diferencias finitas + gradiente conjugado) y atenuación balística | sin Monte Carlo, sin resolución temporal; contorno extrapolado de Robin (Groenhuis) |
-| Rayos X/TAC | Beer-Lambert con base agua + hueso (NIST/ICRU-44), espectro de tubo de Kramers, endurecimiento, ruido de Poisson, FBP | sin scatter, sin líneas características del W, haz paralelo, 2D |
-| RM | Ecuaciones de señal analíticas (T1, T2, DP, STIR, GRE, UTE) validadas contra un Bloch de isocromatos; k-space recortado y ruido de Rice | no es un simulador de Bloch espacial: sin B0/B1 no uniformes, sin gradientes reales, sin artefactos de desfase |
-| EIT | Cuasi-estático div(σ*∇φ) = 0 con la admitividad compleja de Gabriel, COCG matrix-free, electrodos ideales en la piel, matriz de sensibilidad y reconstrucción de diferencias de un paso (Tikhonov) | 2D, sin impedancia de contacto ni modelo completo de electrodo (CEM), reconstrucción lineal, diferencias finitas en vez de FEM |
+| Ultrasonido | FDTD elástico velocidad-tensión, 4.º orden en espacio, leapfrog; CPML con M-PML automática si una capa sólida la cruza; atenuación GSLS con un peso por mecanismo (2 mecanismos por defecto, error < 2 % frente a la ley α₀·f^y en la banda del pulso); corrección de la interfaz fluido-sólido; speckle por fluctuación de densidad, rugosidad de interfaces; cortical transversalmente isótropa opcional; sonda con respuesta de elemento, onda plana, focalizada y STA, DAS/CF/DMAS/SLSC | 2D, CPU, float32, acústica lineal, tejidos blandos como fluido (`mu = 0`), sonda ideal; FWHM axial de un dispersor puntual +9-17 % sobre la teoría; reflexión de la M-PML −28 dB en el hueso |
+| Ultrasonido 3D | `ElasticSolver3D` (9 campos, CPML, GSLS, cortical anisótropa opcional, corrección de interfaz) y tibia tubular | Dominios de pocos cm a ≲ 1 MHz (~27 Mceldas·paso/s por hilo); CPML clásica (cortical anisótropa sin atenuación inestable en la capa); sin speckle ni porosidad |
+| Maxwell | FDTD de Yee 2D modo TM, CPML; banda estrecha o **banda ancha** con Debye multipolo (ADE), promedio sub-celda, Numba; SAR | 2D TM, sin antenas ni fuentes realistas; Debye sólo vale dentro de la banda ajustada |
+| Óptica | Difusión estacionaria (FD + gradiente conjugado), atenuación balística y **Monte Carlo de fotones** (MCML/MCX en 2D extruido, Fresnel, resolución temporal, Numba) | n único por tejido y g = 0.9 para todos (no verificado); superficie curva en escalera; sin fluorescencia |
+| Rayos X/TAC | Beer-Lambert NIST/ICRU-44, espectro de tubo con líneas K, ánodo y filtros, haz paralelo y en abanico (FBP, OS-SART con TV), scatter Monte Carlo, detector (MTF, NPS) | 2D; scatter sin electrones ni fluorescencia; sin corrección de scatter, short scan ni cono 3D; HVL −5 a −7 % frente a SpekPy a 50-70 kVp |
+| RM | Ecuaciones de señal analíticas (rápidas, por defecto) o **Bloch espacial** (isocromatos, desplazamiento químico, B0 por susceptibilidad, T2*, bobina, ruido en k-space) | 2D cartesiano, spoiling ideal, sin flujo ni movimiento, sin comparar con KomaMRI/JEMRIS |
+| EIT | Cuasi-estático div(σ*∇φ) = 0 con la admitividad de Gabriel, COCG con multigrid, electrodos ideales o **CEM**, matriz de sensibilidad, reconstrucción de un paso y **Gauss-Newton** (Tikhonov, Laplaciano, NOSER, TV), métricas GREIT | 2D con diferencias finitas (sin FEM ni 3D), sin GREIT entrenado; impedancia de contacto sin valor de referencia verificado |
 
 Qué lo distingue: **una sola anatomía paramétrica 2D (tibia, antebrazo,
 muslo; cortes longitudinales y transversales), con máscara de verdad de
 terreno de la fractura, hematoma y edema, reproducible por semilla a
 cualquier resolución, vista por cinco físicas distintas, y un generador de
 datasets etiquetados.** Ningún simulador de las tablas siguientes ofrece eso
-en un solo paquete (ver §9).
+en un solo paquete (ver §9). No lo distingue la escala, la velocidad absoluta
+ni la validación externa, donde los demás están por delante.
 
 ## 2. Ultrasonido
 
 | Herramienta | Método | 2D/3D | GPU | Atenuación / dispersión | Validación publicada | Licencia | Lenguaje | Uso principal |
 |---|---|---|---|---|---|---|---|---|
-| **wavesim** | FDTD elástico P+S, 4.º orden, CPML | 2D | No | GSLS (ley ∝ f, Q casi constante); dispersión causal consistente con el GSLS | Tests propios contra soluciones analíticas (velocidad P/S < 1 %, reflexión 0.539 vs 0.538, atenuación < 5 %); §10 de este documento contra k-Wave | Ver `pyproject.toml` (no declarada en esta copia) | Python/NumPy | Visibilidad de fracturas, datasets |
+| **wavesim** | FDTD elástico P+S, 4.º orden, CPML (M-PML si un sólido la cruza); solver 3D de dominio pequeño; cadena de imagen (STA, DAS/CF/DMAS/SLSC) | 2D (+ 3D reducido) | No (Numba en CPU) | GSLS por mecanismo (2 por defecto): α(f) a ≤ 2 % de la ley α₀·f^y y c(f) a ≤ 2 m/s del modelo; cortical anisótropa opcional | Validación interna frente a analítico en `docs/validacion/`: convergencia de 2.º orden, R(θ), Lamb S0/A0 ≤ 2 %, Christoffel ≤ 0.1 %; contra k-Wave sólo el caso de dos capas fluidas (§10) | Ver `pyproject.toml` (no declarada en esta copia) | Python/NumPy | Visibilidad de fracturas, datasets |
 | **k-Wave** (MATLAB) | Pseudoespectral con corrección k-space; solver fluido 1D/2D/3D/axisimétrico; solver elástico `pstdElastic2D/3D` (PSTD) | 1D/2D/3D | Sí (binarios C++/CUDA; el elástico en 2016 sólo vía `gpuArray` de MATLAB según el foro, dato antiguo) | Ley de potencia con Laplaciano fraccionario (absorción y dispersión causal); el elástico usa Kelvin-Voigt (∝ f² a baja frecuencia) | Treeby & Cox 2010 (JBO y JASA); Treeby et al. 2014 (elástico); participó en benchmarks multi-código (ver Aubry 2022, participación concreta [NV]) | LGPL (3.0 en el wheel de Python; versión para MATLAB [?]) | MATLAB, C++, CUDA | Fotoacústica, ultrasonido terapéutico, imagen, transcraneal |
 | **k-wave-python** 0.6.2 | Mismo k-Wave; backend `python` (NumPy/CuPy) y backend `cpp` (binarios OMP/CUDA) | 1D/2D/3D, axisimétrico | Sí (CuPy o CUDA con capacidad de cómputo 7.5 o superior según README de v0.6.x) | Igual que k-Wave (fluido) | 47 pruebas de paridad con MATLAB según notas de v0.6.1 | LGPL-3.0 (verificado en el paquete instalado) | Python | Idem, desde Python |
 | **SimSonic** | FDTD elástico (Bossy, Laugier et al.), 2D y 3D | 2D/3D | [?] | Anisotropía y microporosidad modeladas en cortical; detalle de la atenuación [NV] | Bossy et al. 2004 (JASA, axial transmission en cortical 3D) y 2005 (PMB, hueso trabecular desde µCT sincrotrón); usado en decenas de estudios de ultrasonometría ósea | [?] (la web oficial no era accesible) | [NV] (C/C++) | **Ultrasonometría cuantitativa de hueso**, transmisión axial, hueso trabecular |
@@ -88,35 +131,78 @@ simuladores sino usos de los anteriores):
 
 ### Qué hacen mejor ellos
 
-- **3D y anisotropía.** SimSonic (y Sim4Life, COMSOL) trabajan en 3D con
-  cortical anisótropa y porosa; en wavesim el corte 2D no reproduce la
-  difracción 3D ni las ondas guiadas de un tubo (ver Bossy 2004).
-- **Rapidez y escala.** Sim4Life, k-Wave (CUDA), j-Wave, Stride y Fullwave
-  corren en GPU; wavesim a 3 MHz y 24×22 mm tarda ~1 min en CPU con NumPy (~1.6-3 veces menos con Numba), y a 7-10 MHz
+Brechas de la primera redacción, con su estado actual:
+
+- **3D y anisotropía: parcialmente cerrada.** wavesim tiene ahora un solver
+  3D (`ElasticSolver3D`, tibia tubular) y cortical transversalmente isótropa
+  opcional (tensor de Rho 1996; c13 y densidad no verificados). Velocidades
+  P/S a ≤ 0.4 % y 2D extruido = 3D a ~1e-6 ([elastico3d](validacion/elastico3d.md),
+  [anisotropia](validacion/anisotropia.md)). **Sigue por detrás de SimSonic,
+  Sim4Life y COMSOL**: ~27 Mceldas·paso/s por hilo (dominios de pocos cm a
+  ≲ 1 MHz), CPML clásica (una cortical anisótropa sin atenuación que entra en la
+  capa es inestable), sin speckle, porosidad ni rugosidad, y sólo a 0.5 MHz en
+  el caso de aplicación. Un B-mode 3D a 3 MHz necesitaría GPU. Los ejes de la
+  cortical siguen alineados con la malla (sin inclinación).
+- **Rapidez y escala: abierta.** Sim4Life, k-Wave (CUDA), j-Wave, Stride y
+  Fullwave corren en GPU; wavesim sigue en CPU. Medido en esta revisión: una
+  tibia de 24×22 mm a 3 MHz con 3 ángulos tarda 21 s con Numba y 4 hilos y
+  2 mecanismos (16 s con 1; la primera incluye la compilación). A 7-10 MHz,
   minutos o más.
-- **Menos puntos por longitud de onda.** El método pseudoespectral de k-Wave
-  permite mallas más gruesas que un FDTD de 4.º orden para la misma
-  dispersión numérica [NV: valor concreto]. En §10, con 8 puntos por longitud
-  de onda ambos códigos dan errores comparables.
-- **Atenuación más flexible.** k-Wave usa una ley de potencia con exponente
-  arbitrario; Fullwave admite alpha0 y gamma variables en el espacio; wavesim
-  usa 1-3 mecanismos de relajación con ajuste global (error de ±12 % con 1
-  mecanismo; ver §10: con 2 mecanismos baja a ±5 %).
-- **No linealidad, trayectorias focalizadas, terapia y transductores
-  reales.** k-Wave, Field II, FOCUS: wavesim sólo tiene sonda lineal ideal y
-  acústica lineal.
-- **Hueso trabecular desde µCT** (SimSonic): wavesim lo trata como medio
-  efectivo.
-- **Validación publicada y revisada por pares.** k-Wave, Field II, SimSonic y
-  Sim4Life tienen años de comparaciones externas; la de wavesim es interna
-  (y, desde este documento, un primer cruce con k-Wave).
+- **Menos puntos por longitud de onda: abierta.** El pseudoespectral de k-Wave
+  permite mallas más gruesas [NV: valor concreto]. En el FDTD de wavesim el error de
+  velocidad de fase es de segundo orden por el paso temporal (+0.3 % a 16 ppw
+  con CFL 0.9) y el de R es de segundo orden en la interfaz (+0.2 % a 16 ppw)
+  ([elastico](validacion/elastico.md)).
+- **Atenuación más flexible: cerrada en lo esencial, no en la flexibilidad.**
+  Con un peso por mecanismo y tiempos de relajación optimizados, 2 mecanismos
+  dan ≤ 2 % frente a α₀·f^y en [0.5, 1.8]·f₀ para y de 1 a 2 (antes 14-97 % con
+  1) a ×1.5 de coste, y 3 dan ≤ 1.8 % en [0.3, 2.5]·f₀ a ×1.7
+  ([atenuacion](validacion/atenuacion.md)); `n_mechanisms=2` es ahora el valor
+  por defecto. **Siguen por delante** k-Wave (exponente arbitrario en toda la
+  banda, con Laplaciano fraccionario) y Fullwave (α₀ y γ variables en el
+  espacio): wavesim sólo ajusta una banda y el exponente es el del tejido.
+- **Ondas S, conversión de modo y ondas guiadas: verificadas, no comparadas.**
+  U3-U5 frente a soluciones analíticas (ver §11): R(θ) agua-cortical ≤ 0.7 %
+  hasta 22°, ángulo crítico P a ±0.15°, Lamb S0/A0 ≤ 2 % de Rayleigh-Lamb, también
+  con carga de agua. **Fuera de tolerancia:** |R| de 3.9-5 % en los bordes de
+  28-53° y 59-70° y de 9-17 % a ±3° de los ángulos críticos (por el montaje finito, no
+  cambia con la malla); S0 de la placa libre con 20 celdas en el espesor llega a
+  8.7 % a 400-500 kHz (con 30 celdas, 1.3 %). Se encontró y corrigió un error
+  real del solver en la interfaz fluido-sólido a incidencia oblicua (4.6 → 1.5 % a
+  10 ppw; 2.3 → 0.4 % a 20 ppw). No se ha comparado con SimSonic ni con k-Wave
+  elástico.
+- **Estabilidad con ondas guiadas: corregida con un coste.** La cortical que
+  cruza la CPML crecía exponencialmente (la inestabilidad clásica de las PML con
+  ondas retrógradas); la M-PML automática la elimina en 40 000 pasos, pero
+  refleja −28 dB (amplitud, 4 %) en el hueso y −53 dB en agua. En el B-mode de
+  tibia la envolvente cambia 1.3 % (L2). Queda sin investigar un fantoma
+  osteoporótico realista sin atenuación que crece despacio, y el 3D no tiene
+  M-PML ([estabilidad](validacion/estabilidad.md)).
+- **Imagen: cadena cerrada, calidad medida.** Sonda con respuesta de elemento,
+  onda plana, focalizada y STA, DAS/CF/DMAS/SLSC, métricas de PSF y speckle
+  ([imagen_ultrasonido](validacion/imagen_ultrasonido.md)). FWHM lateral dentro
+  del 12 % de la teoría, SNR de speckle 1.85 ± 0.10 frente a 1.91 y gCNR de
+  0.91-0.97 en un quiste. **No cumple** el objetivo ≤ 10 % de FWHM axial para un
+  dispersor puntual a 2 MHz (+9 a +17 %; con una interfaz plana, +1.9 %). Sin ruido
+  electrónico ni observador, ninguna variante mejora de forma clara la visibilidad
+  de la fisura de 0.15 mm. No hay sondas reales (curvadas, matriciales,
+  geometría de un fabricante) ni Field II.
+- **No linealidad, terapia, transductores reales: abierta.** k-Wave, Field II y
+  FOCUS; wavesim es de acústica lineal.
+- **Hueso trabecular desde µCT** (SimSonic): abierta; wavesim lo trata como
+  medio efectivo (con red trabecular dibujada en el modo realista).
+- **Validación publicada y revisada por pares: abierta.** k-Wave, Field II,
+  SimSonic y Sim4Life tienen años de comparaciones externas; la de wavesim es
+  interna, frente a soluciones analíticas, más el cruce antiguo con k-Wave de §10.
 
 ### Qué aporta wavesim
 
 - La misma anatomía con **máscara de fractura/hematoma/edema** alimenta
   cinco físicas (ver §9) y un generador de datasets.
 - Solver elástico con conversión de modo en el hueso **y** fluidos en un
-  paquete de decenas de ficheros Python legibles, sin MATLAB ni binarios.
+  paquete de decenas de ficheros Python legibles, sin MATLAB ni binarios,
+  ahora con atenuación de ley de potencia a ≤ 2 % y validación analítica de
+  ondas S y guiadas (que k-wave-python 0.6.2 no cubre).
 - Rugosidad de interfaces y fracturas paramétricas (transversal, oblicua,
   fisura, conminuta, incompleta, desplazada) reproducibles por semilla.
 - Atenuación viscoelástica por tejido y speckle por microestructura
@@ -126,7 +212,7 @@ simuladores sino usos de los anteriores):
 
 | Si necesitas... | Usa |
 |---|---|
-| Ultrasonido 3D con hueso cortical anisótropo, transmisión axial, ondas guiadas en un tubo | SimSonic (si lo consigues bajo su licencia [?]), Sim4Life o COMSOL |
+| Ultrasonido 3D con hueso cortical anisótropo a 1 MHz o más, transmisión axial, ondas guiadas en un tubo (wavesim 3D llega a dominios pequeños a ≲ 1 MHz) | SimSonic (si lo consigues bajo su licencia [?]), Sim4Life o COMSOL |
 | Física de ondas S en un medio mixto fluido-sólido a gran escala con GPU | Sim4Life o COMSOL (dG-FEM), o k-Wave elástico en MATLAB (CPU) |
 | Propagación fluida 2D/3D con atenuación de ley de potencia rápida y de referencia | k-Wave / k-wave-python |
 | Optimizar o invertir (FWI, tomografía ultrasónica, redes diferenciables) | j-Wave o Stride |
@@ -137,7 +223,7 @@ simuladores sino usos de los anteriores):
 
 | Herramienta | Método | 2D/3D | GPU | Dispersión | Validación publicada | Licencia | Lenguaje | Uso principal |
 |---|---|---|---|---|---|---|---|---|
-| **wavesim `em.fdtd_tm`** | FDTD de Yee 2.º orden, TM, CPML, banda estrecha | 2D | No | No (propiedades a f0, Cole-Cole de Gabriel) | Tests: constante de fase y atenuación en músculo y grasa (< 2 % y < 5 %) | (ver arriba) | Python/NumPy | Penetración, campo y SAR en el corte |
+| **wavesim `em.fdtd_tm`** | FDTD de Yee 2.º orden, TM, CPML; banda estrecha o banda ancha (ADE de Debye multipolo), sub-celda, Numba | 2D | No | Cole-Cole de Gabriel ajustado por 6 polos de Debye comunes (≤ 0.7 % en 0.1-10 GHz) | Frente a soluciones exactas: β ≤ 0.23 %, α ≤ 1.6 %, losa ≤ 0.31 dB, Mie 2D 1.7-3.3 % ([maxwell](validacion/maxwell.md)) | (ver arriba) | Python/NumPy (+ Numba) | Penetración, campo y SAR en el corte |
 | **openEMS** | FDTD por circuito equivalente (Liebig et al., Int. J. Numer. Model.), cartesianas y cilíndricas | 3D (cilíndricas incluidas) | No confirmado | Lorentz/Drude [NV] | Validado con antenas y estructuras de microondas (Liebig et al.); no biomédico de forma específica | GPL v3 o posterior (CSXCAD, LGPL) | C++ con interfaces Matlab/Octave y Python | Antenas, circuitos de RF |
 | **Meep** | FDTD de Yee, subpíxel, no lineal (Padé), cilíndrico | 1D/2D/3D, cilíndrico | No confirmado | ε(ω), μ(ω) con pérdidas o ganancia | Oskooi et al., Comput. Phys. Commun. 181 (2010) 687 | GPL (2.0 o posterior según GitHub) | Python, Scheme, C++ | Fotónica; 2D TM listo para uso general |
 | **gprMax** | FDTD, 2D y 3D, material dispersivo multipolo, CPML | 2D/3D | Sí (CUDA, OpenCL, Metal), MPI | Multipolo (Debye, Drude, Lorentz) | Warren et al., Comput. Phys. Commun. 209 (2016) y 237 (2019, motor GPU hasta 30 veces más rápido que CPU OpenMP) | GPL v3 o posterior | Python + Cython | Georradar; también bioelectromagnetismo y SAR (según README) |
@@ -151,35 +237,61 @@ Kirchhoff, fisuras transversales de 1 mm de ancho y 13 mm de profundidad con
 (Sci. Rep. 2023) y Bosco et al. (Curr. Med. Imaging 2024). El solver usado
 no figura en los fragmentos consultados.
 
-**Qué hacen mejor ellos.** 3D, antenas reales y adaptación de impedancia,
-materiales dispersivos de banda ancha, mallas no uniformes, SAR en cuerpo
-entero con fantomas 3D (Sim4Life), GPU (gprMax, Sim4Life). En wavesim una
-onda plana sin antena en 2D TM da la penetración pero no la señal medida en
-una antena.
+**Qué hacen mejor ellos.** Brechas de la primera redacción:
+
+- **Materiales dispersivos de banda ancha: cerrada.** `BroadbandMaxwellTMSolver`
+  ajusta el Cole-Cole de Gabriel con polos de Debye comunes (error máximo de
+  ε′ y σ ≤ 0.7 % en 0.1-10 GHz) y obtiene muchas frecuencias de un solo pulso.
+  En músculo y grasa homogéneos, β a ≤ 0.23 % y α a ≤ 1.6 % hasta 10 GHz;
+  losa piel/grasa/músculo/cortical a ≤ 0.31 dB en toda la banda con
+  dx = 0.125 mm (0.88 dB a 10 GHz con 0.25 mm: 60 dB de pérdida total); frente a
+  la serie de Mie 2D, 1.7-3.3 % con 15-20 puntos por longitud de onda y
+  promedio sub-celda (sin él, 6-11 %). Kernels Numba 2-5 veces más rápidos que
+  NumPy ([maxwell](validacion/maxwell.md),
+  [rendimiento_em](validacion/rendimiento_em.md)). Frente a gprMax/Meep esto
+  iguala el *método*, no la escala ni la verificación cruzada: no se ha
+  ejecutado ninguno de los dos.
+- **Abiertas:** 3D y modo TE; antenas reales, adaptación de impedancia y
+  arrays (openEMS, Meep, gprMax); mallas no uniformes; SAR en cuerpo entero con
+  fantomas 3D (Sim4Life); GPU. La fuente de onda plana de banda ancha debe estar
+  en una zona homogénea, y quedan ~0.8 % de error de campo fuera del cilindro
+  de hueso sin origen identificado.
 
 **Qué aporta wavesim.** La misma geometría de fractura con edema y hematoma
 alimenta el Maxwell, con las propiedades de Gabriel del mismo diccionario de
 tejidos que usa el ultrasonido.
 
 **Cuándo recomendar otra:** antenas o arrays de microondas para imagen
-(openEMS, Meep, gprMax), SAR normativo (Sim4Life), banda ancha con tejidos
-dispersivos (gprMax con multipolo, Meep).
+(openEMS, Meep, gprMax), SAR normativo (Sim4Life), 3D.
 
 ## 4. Óptica (UV, visible, IR, THz)
 
 | Herramienta | Método | 2D/3D | GPU | Atenuación/dispersión | Validación publicada | Licencia | Lenguaje | Uso |
 |---|---|---|---|---|---|---|---|---|
-| **wavesim `em.optics`** | Difusión estacionaria (FD + CG) y balístico | 2D | No | μa, μs' por tejido y longitud de onda (orden de magnitud en IR medio y UV) | Test: decaimiento coincide con μ_eff analítico | (ver arriba) | Python/NumPy | Penetración de la luz en la extremidad |
+| **wavesim `em.optics`, `em.montecarlo`** | Difusión estacionaria (FD + CG), balístico y Monte Carlo de fotones (MCML/MCX, Numba) | 2D extruido (fotones en 3D) | No (Numba en CPU) | μa, μs' por tejido y longitud de onda (orden de magnitud en IR medio y UV); n = 1.4 y g = 0.9 únicos | MC frente a van de Hulst (R, T a ≤ 1.6 σ), Fresnel exacto (1e-7), balístico (≤ 1.2 σ) ([optica](validacion/optica.md)) | (ver arriba) | Python/NumPy (+ Numba) | Penetración de la luz en la extremidad |
 | **MCX** | Monte Carlo de fotones en voxels 3D (Fang & Boas 2009) | 3D | Sí (CUDA); MCXCL para OpenCL | μa, μs, g, n por voxel | Fang & Boas, Opt. Express 17 (2009) 20178 | GPL v3 | C/CUDA; Python (`pmcx`), MATLAB | Estándar de facto para Monte Carlo GPU |
 | **MCML** | Monte Carlo en capas planas infinitas (Wang, Jacques & Zheng 1995) | Capas 1D (simetría cilíndrica) | No | μa, μs, g, n por capa | Wang et al., Comput. Methods Programs Biomed. 47 (1995) 131 [NV: cita] | [?] | C | Referencia histórica |
 | **NIRFAST** | FEM, difusión (Dehghani et al., 2009) | 2D/3D | [NV] | Múltiples longitudes de onda | Dehghani et al., Commun. Numer. Methods Eng. 25 (2009) 711 | [?] | MATLAB | Tomografía óptica difusa |
 | **Toast++** | FEM, difusión, solvers inversos (Schweiger & Arridge) | 2D/3D | No | Dominio del tiempo, frecuencia y estacionario [NV] | J. Biomed. Opt. 19 (2014) 040801 | GPL (según su página en SourceForge) | C++ con MATLAB/Python | Reconstrucción de μa y μs' |
 
-**Qué hacen mejor ellos.** Monte Carlo reproduce el transporte exacto
-(incluida la zona de transición cerca de fuentes y fronteras donde la
-difusión falla), 3D, resolución temporal, fluorescencia. NIRFAST/Toast++
-incluyen reconstrucción inversa. wavesim sólo da fluencia estacionaria en
-2D, y en una extremidad de ~5 cm la señal es completamente difusa.
+**Qué hacen mejor ellos.** Brechas de la primera redacción:
+
+- **Monte Carlo: cerrada en 2D extruido.** wavesim tiene ahora un Monte Carlo
+  estilo MCML/MCX con Henyey-Greenstein, Fresnel, ruleta rusa y resolución
+  temporal opcional, con 540 000 fotones/s en la losa (Numba, 1 hilo). Frente a
+  la tabla 35 de van de Hulst, R = 0.09758 ± 0.00012 (0.09739) y T = 0.66084 ±
+  0.00014 (0.66096); losa de índice 1.5 sin dispersión, 1e-7 del exacto; atenuación
+  balística ≤ 1.2 σ. Con él se midió lo que la difusión no ve: la fluencia en la
+  piel iluminada es ×1.27 la de la difusión a 0.25 mm y la difusión sobreestima
+  ~7 % en el interior de la grasa; lejos de las fronteras coinciden en μ_eff a
+  ≤ 1.3 % ([optica](validacion/optica.md)).
+- **Abiertas:** MCX sigue siendo el estándar (3D, GPU, fluorescencia); el
+  fantoma de wavesim es 2D extruido y de superficie en escalera, con un índice de
+  refracción (1.4) y un g (0.9) únicos y **sin valores de g por tejido
+  verificados**. La transmisión de la pierna es ~10⁻⁸ en las columnas gruesas, al
+  límite de lo medible con 2·10⁶ fotones. No se ha comparado con MCX ni MCML
+  ejecutados. NIRFAST/Toast++ siguen aportando reconstrucción inversa y 3D.
+  En una extremidad de ~5 cm la señal es completamente difusa.
 
 **Qué aporta wavesim.** El mismo corte con fractura, en el mismo "paciente"
 que la ecografía, y la conclusión cuantitativa (pérdida en dB) de que la luz
@@ -193,7 +305,7 @@ inversión (NIRFAST o Toast++).
 
 | Herramienta | Método | 2D/3D | GPU | Física incluida | Validación publicada | Licencia | Lenguaje | Uso |
 |---|---|---|---|---|---|---|---|---|
-| **wavesim `em.xray`** | Beer-Lambert polienergético en base agua + hueso, FBP | 2D, haz paralelo | No | Endurecimiento, ruido de Poisson; sin scatter ni líneas K | Test: Beer-Lambert exacto, FBP exacta en disco, HU de músculo, grasa y hueso a 60 keV, NIST < 1.5 % | (ver arriba) | Python/NumPy | Radiografía y TAC del corte |
+| **wavesim `em.xray`, `fanbeam`, `xray_scatter`, `xray_detector`** | Beer-Lambert polienergético (espectro con líneas K, ánodo, filtros), FBP paralelo y en abanico, OS-SART, scatter Monte Carlo, detector | 2D, paralelo o abanico | No (Numba en CPU) | Endurecimiento, ruido de Poisson, líneas K, Compton/Rayleigh en el scatter (sin electrones ni fluorescencia), MTF y NPS | Beer-Lambert y FBP exactos, HU, NIST < 1.5 %, abanico = paralelo, HVL frente a SpekPy ±5 % a 80-120 kVp ([rayos_x](validacion/rayos_x.md)) | (ver arriba) | Python/NumPy (+ Numba) | Radiografía y TAC del corte |
 | **GATE (Geant4)** | Monte Carlo de partículas | 3D | Variantes [NV] | Física completa de fotones y electrones | Jan et al., Phys. Med. Biol. 49 (2004) 4543 (PET/SPECT) y años de validaciones; nacido para TAC y PET/SPECT | LGPL en la versión pública inicial; términos actuales [?] | C++ con macros | PET, SPECT, TAC, radioterapia |
 | **TOPAS** | Envoltura de Geant4 (Perl et al., Med. Phys. 39, 2012) | 3D | No | Física completa, orientado a radioterapia/protones | Perl et al. 2012 | Gratis para investigación "en intención" según el artículo; términos exactos [?] | C++ con ficheros de parámetros | Radioterapia con protones |
 | **MC-GPU** | Monte Carlo de rayos X en GPU, voxels; secciones eficaces PENELOPE 2006 (sin transporte de electrones) | 3D | Sí (CUDA) | Dispersión Compton, Rayleigh, fotoeléctrico | Badal & Badano, Med. Phys. 36 (2009) 4878 [NV: cita]; 20-40 veces más rápido que 1 núcleo | [?] (distribuido por la FDA) | C/CUDA | Radiografía y TAC con dispersión realista |
@@ -201,37 +313,70 @@ inversión (NIRFAST o Toast++).
 | **TIGRE** | Reconstrucción CBCT en GPU (Bath/CERN) | 3D | Sí (CUDA) | Sólo geometría | Biguri et al., Biomed. Phys. Eng. Express 2 (2016) 055010 | BSD | MATLAB/Python con CUDA | CBCT |
 | **XCIST / CatSim** | Simulador analítico de TAC con fantomas y reconstrucción | 3D | [NV] | Espectro, scatter, ruido, detector (según PMB 2022); usa secciones eficaces de Geant4 | "XCIST: an open access x-ray/CT simulation toolkit", Phys. Med. Biol. 2022 | [?] | Python + C/C++ (`gecatsim`) | Simulación de TAC realista |
 
-**Qué hacen mejor ellos.** Scatter y física completa (GATE, MC-GPU), 3D y
-geometrías reales abanico/cono con detectores (XCIST), reconstrucción
-iterativa y cono (ASTRA, TIGRE). wavesim no puede dar el contraste real a
-bajo kV, donde el scatter importa.
+**Qué hacen mejor ellos.** Brechas de la primera redacción:
+
+- **Scatter: parcialmente cerrada.** Monte Carlo de fotones con Klein-Nishina
+  y función de dispersión incoherente, Rayleigh con factor de forma y
+  fotoeléctrico por diferencia. En un cilindro de músculo de 18 cm a 100 kVp, el scatter
+  da *cupping* de +21 HU (corte de 1 cm) y +54 HU (4 cm) y baja el contraste
+  hueso-músculo un 8 % y un 26 %. La SPR en agua (0.78, 2.50, 5.43 a 10, 20, 30 cm)
+  es un 17-29 % menor que la de una cifra de la literatura que no se pudo
+  verificar: **no hay validación cuantitativa del scatter**. Sin fluorescencia,
+  transporte de electrones ni Doppler; el scatter de un TAC se calcula en pocas
+  vistas y se interpola; no hay corrección de scatter en la reconstrucción.
+- **Espectro y líneas K: parcialmente cerrada.** Frente a SpekPy 2.5.4
+  (ejecutado en la sesión), la HVL cae dentro de ±5 % de 80 a 120 kVp pero a
+  **−6.6 % y −5.2 % a 50 y 70 kVp (fuera del objetivo)**; los dos parámetros libres se
+  ajustaron a esos mismos casos, así que no es una predicción independiente. Las
+  tablas de Cu y W y las energías de las líneas K están de memoria, sin
+  verificar.
+- **Geometrías reales y reconstrucción iterativa: parcialmente cerrada.**
+  Abanico curvo y plano con FBP exacta (RMSE del disco 0.014-0.016, igual al haz
+  paralelo) y OS-SART con TV: con 30-60 vistas el RMSE baja un 25-32 % respecto de
+  FBP, pero con 180 vistas ya no gana. **Siguen abiertos** el haz cónico 3D, el
+  *short scan* con pesos de Parker y los proyectores en GPU de ASTRA/TIGRE.
+- **Detector y calidad de imagen: cerrada en lo básico.** MTF por el método
+  del borde (error ≤ 0.027 hasta MTF ≈ 0.6) y NPS del TAC (Parseval al 0.3 %); no hay
+  referencia cuantitativa verificada para la forma del NPS.
+- **Física completa de partículas y dosimetría: abierta.** GATE, MC-GPU y TOPAS.
 
 **Qué aporta wavesim.** TAC y radiografía del mismo corte que la ecografía y
-la RM, y rapidez (segundos).
+la RM, y rapidez (segundos para el TAC analítico).
 
-**Cuándo recomendar otra:** dosimetría o imagen con scatter (MC-GPU, GATE),
-CBCT/geometrías reales (XCIST, TIGRE, ASTRA).
+**Cuándo recomendar otra:** dosimetría o imagen con scatter fiable (MC-GPU,
+GATE), CBCT/geometrías reales en 3D (XCIST, TIGRE, ASTRA).
 
 ## 6. Resonancia magnética
 
 | Herramienta | Método | 2D/3D | GPU | Física | Validación publicada | Licencia | Lenguaje | Uso |
 |---|---|---|---|---|---|---|---|---|
-| **wavesim `mri`** | Ecuaciones de señal analíticas por tejido + k-space recortado + ruido de Rice; Bloch de isocromatos sólo para validar | 2D | No | T1, T2, PD, secuencias T1/T2/DP-FS/STIR/GRE/UTE | Ecuaciones coinciden con Bloch (1e-6) | (ver arriba) | Python/NumPy | Contraste de la fractura (edema, hematoma) |
+| **wavesim `mri`** | Dos motores: señal analítica por tejido (rápida, por defecto) y Bloch espacial de isocromatos con eventos y estados de desfase | 2D cartesiano | No | T1, T2, PD, T2', desplazamiento químico (1 o 6 picos), campo B0 por susceptibilidad, bobina de superficie, ruido en k-space; SE/IR/GRE | Bloch espacial = ecuaciones de señal a 1e-11; desplazamiento químico exacto; cilindro de susceptibilidad ≤ 0.7 % con B0 alineado ([rm](validacion/rm.md)); no comparado con KomaMRI/JEMRIS | (ver arriba) | Python/NumPy (+ Numba) | Contraste y artefactos de la fractura (edema, hematoma) |
 | **JEMRIS** | Bloch con sólo CPU multihilo; secuencias autocontenidas | 3D | No | Bloch completo con campos B0/B1/gradiente, pulsos reales | Stöcker et al., Magn. Reson. Med. 64 (2010) 186 | GPL-2.0 o posterior (catálogo Helmholtz) | C++ (MATLAB/Python) | Secuencias, artefactos |
 | **MRiLab** | Bloch en GPU, GUI | 3D | Sí | Bloch completo | Liu et al., Magn. Reson. Med. 2017 | [?] | MATLAB/C++/CUDA | Docencia, diseño de secuencias |
 | **KomaMRI.jl** | Bloch en CPU y GPU, secuencias Pulseq | 3D | Sí | Bloch completo, movimiento | Castillo-Passi et al., Magn. Reson. Med. (2023): error medio absoluto del 0.1 % frente a JEMRIS | MIT | Julia | Simulación general |
 | **MRXCAT** | Generador de fantomas basado en XCAT con modelo de señal, bobinas y ruido | 2D+t / 3D | No | Señal cardíaca con movimiento | Wissmann et al., J. Cardiovasc. Magn. Reson. 16 (2014) 63 | [?] ("disponible online" según el artículo) | MATLAB [NV] | RM cardíaca |
 
-**Qué hacen mejor ellos.** Bloch espacial real: heterogeneidad de B0/B1,
-gradientes, pulsos selectivos, flujo y movimiento, trayectorias no
-cartesianas, artefactos de susceptibilidad en la interfaz hueso-aire; GPU.
-wavesim es "señal en estado estacionario ideal + k-space + ruido".
+**Qué hacen mejor ellos.** Brechas de la primera redacción:
+
+- **Bloch espacial y artefactos: cerrada en 2D cartesiano.** `engine="bloch"`
+  da desplazamiento químico de la grasa (1.7 píxeles con 130 Hz/píxel a 1.5 T,
+  idéntico al esperado), distorsión y pérdida de señal por el campo B0 de la
+  susceptibilidad (cilindro infinito a ≤ 0.7 % con B0 alineado con la malla;
+  2.6-5.5 % con B0 oblicuo, por la escalera), desfase intravóxel y sensibilidad de
+  bobina. Una imagen de pierna de 128×128 tarda ~1 s en modo estacionario
+  y ~50 s línea a línea ([rm](validacion/rm.md)).
+- **Abiertas:** 3D, perfil de corte y pulsos selectivos reales, flujo,
+  movimiento y difusión, trayectorias radial y espiral, spoiling con gradientes
+  reales y ecos estimulados residuales, secuencias Pulseq, GPU. **No se ha
+  comparado numéricamente con KomaMRI ni con JEMRIS** (la validación es frente a
+  soluciones exactas); el UTE sigue en el motor analítico. La χ de los tejidos
+  blandos se aproxima por la del agua y la del hueso viene de una costilla bovina.
 
 **Qué aporta wavesim.** Valores de T1/T2/PD de fractura (edema, hematoma)
 sobre la misma anatomía que el resto, a segundos por imagen.
 
-**Cuándo recomendar otra:** artefactos reales (KomaMRI, JEMRIS), diseño de
-secuencias o fantomas cardíacos (MRXCAT).
+**Cuándo recomendar otra:** flujo, movimiento, 3D o secuencias arbitrarias
+(KomaMRI, JEMRIS), diseño de secuencias o fantomas cardíacos (MRXCAT).
 
 ## 7. Impedancia eléctrica (EIT)
 
@@ -245,20 +390,33 @@ conejo, placa inteligente, estudios antiguos de Aberdeen con EIT de miembro);
 no se encontró ningún simulador específico de EIT para detección de
 fracturas.
 
-**Frente a `wavesim.em.quasistatic`.** EIDORS y pyEIT trabajan con elementos
-finitos (geometrías curvas, 3D), modelo completo de electrodo con impedancia de
-contacto y algoritmos de reconstrucción establecidos (GREIT, Gauss-Newton
-iterativo, priors). wavesim usa diferencias finitas 2D, electrodos ideales y
-una reconstrucción lineal de un paso: sirve para estimar si la fractura
-(sobre todo su hematoma y edema) cambia de forma medible las tensiones de
-borde, no para reconstrucción cuantitativa. Para eso conviene exportar el
-fantoma y usar EIDORS o pyEIT.
+**Frente a `wavesim.em.quasistatic`.** wavesim incorpora ahora el modelo
+completo de electrodo (CEM) con impedancia de contacto, la reconstrucción
+Gauss-Newton (Tikhonov, Laplaciano, NOSER, variación total), las métricas GREIT
+y un precondicionador multigrid ([eit](validacion/eit.md)). Frente a la serie
+de Fourier de un disco, el CEM da errores de 1.4-1.5 % (norma 0.67 %); con
+electrodos ideales sólo se llega a < 2 % con dx = 0.5 mm y electrodos de 4
+celdas. Con una inclusión de sangre de 4 mm de radio y 70 dB, el error de
+posición baja de 2.4-3.2 mm (un paso, NOSER) a 0.08 mm (TV), 0.18 (Laplaciano) y 0.33
+(Tikhonov); con NOSER falla en la periferia. En la pierna con fractura, el
+un paso da 7.2 mm de error del píxel máximo y GN-Laplaciano 2.0-4.3 mm (**una sola
+realización de ruido**, no es una cifra firme); un modelo ideal con datos CEM
+falla en 27 mm salvo con el Laplaciano. El multigrid pasa de 922 a 13-16
+iteraciones (16 inyecciones: ~255 s → 0.7 s).
+
+**Siguen abiertos:** FEM (geometrías curvas), 3D, GREIT entrenado, patrones
+de inyección no adyacentes y electrodos de forma arbitraria. El valor típico de
+z_c de un electrodo real no se pudo verificar y, con la piel del fantoma, el
+contacto apenas cambia la imagen. EIDORS y pyEIT siguen siendo los estándares
+validados: para reconstrucción cuantitativa conviene exportar el fantoma y
+usarlos; wavesim sirve para estimar si el hematoma y el edema cambian de forma
+medible las tensiones de borde.
 
 ## 8. Fantomas anatómicos
 
 | Fantoma | Tipo | Dimensión | Contenido | Acceso/licencia |
 |---|---|---|---|---|
-| **wavesim `phantoms`** | Paramétrico, geométrico, por semilla | 2D | Tibia, antebrazo, muslo; fracturas (6 tipos) con máscara; hematoma, edema | Parte del paquete |
+| **wavesim `phantoms`** | Paramétrico, geométrico, por semilla; modo realista (hueso poroso, red trabecular, fascias) | 2D (+ tibia tubular 3D y fractura transversal 3D) | Tibia, antebrazo, muslo; fracturas (6 tipos) con máscara; hematoma, edema | Parte del paquete |
 | **XCAT (Segars et al.)** | Superficies NURBS 4D, cuerpo entero | 3D+t | Anatomía y fisiología (corazón, respiración); series por edad y tamaño | Distribuido por Duke; **términos [?]** |
 | **Virtual Population (IT'IS)** | Modelos voxelizados segmentados desde RM, computables y posables | 3D | Cuerpo entero, incluidas extremidades y huesos | Académica y comercial bajo acuerdos distintos; modelos computables de alta resolución integrados con Sim4Life; **precios [?]** |
 | **MIDA (Iacono et al. 2015)** | Segmentación multimodal 500 µm | 3D | **Sólo cabeza y cuello** (no sirve para extremidades) | Gratis (salvo gastos de gestión), DOI 10.13099/ViP-MIDA-V1.0 |
@@ -294,6 +452,15 @@ una revisión sistemática.
 
 Script: `benchmarks/kwave_comparison.py` (cabecera con instrucciones de
 instalación; `k-wave-python` **no** está en `pyproject.toml`).
+
+> **Estado de esta sección.** Las medidas de k-Wave y las de wavesim de §10.2
+> y §10.3 se hicieron con una versión anterior de wavesim y **no se han
+> repetido**: k-wave-python no estaba instalado al actualizar el documento, así
+> que no hay una comparación directa nueva. Lo que sí se ha rehecho es la parte
+> de wavesim del caso B, con la atenuación por mecanismo (ver §10.3). Los
+> números de wavesim de §10.2 podrían haber cambiado con la corrección de la
+> interfaz fluido-sólido (que actúa sobre todo a incidencia oblicua, no a la
+> normal de este caso).
 
 ### 10.1 Entorno y método
 
@@ -386,23 +553,31 @@ expansión cilíndrica 1/√r; la velocidad de fase de la diferencia de fase.
 | α nominal (dB/cm) | 1.351 | 1.673 | 2.000 | 2.332 | 2.669 |
 | α k-Wave medida | 1.252 | 1.546 | 1.846 | 2.153 | 2.458 |
 | α wavesim 1 mecanismo | 1.421 | 1.808 | 2.146 | 2.437 | 2.681 |
-| α wavesim 2 mecanismos | 1.417 | 1.718 | 2.015 | 2.314 | 2.613 |
 | Error vs nominal, k-Wave | −7.3 % | −7.5 % | −7.7 % | −7.7 % | −7.9 % |
-| Error vs nominal, wavesim 1 mec. | +5.2 % | +8.1 % | +7.3 % | +4.5 % | +0.4 % |
-| Error vs nominal, wavesim 2 mec. | +4.9 % | +2.7 % | +0.8 % | −0.8 % | −2.1 % |
+| Error vs nominal, wavesim 1 mec. (igual que antes) | +5.2 % | +8.1 % | +7.3 % | +4.5 % | +0.4 % |
+| Error vs nominal, wavesim 2 mec. (**nuevo**, `atenuacion.md`; antes +4.9 … −2.1 %) | +1.1 % | +0.4 % | −0.7 % | −1.4 % | −1.5 % |
+| Error vs nominal, wavesim 3 mec. (**nuevo**) | −1.4 % | −1.7 % | −1.4 % | −0.7 % | +0.2 % |
 | c fase k-Wave (m/s) | 1633 | 1636 | 1638 | 1637 | 1638 |
 | c fase wavesim 1 mec. (m/s) | 1578 | 1580 | 1583 | 1585 | 1587 |
-| c fase wavesim 2 mec. (m/s) | 1579 | 1580 | 1583 | 1585 | 1587 |
 
-Tiempos: k-Wave 91.5 s, wavesim 6.3 s (1 mec.) y 7.9 s (2 mec.).
+Las filas de k-Wave y de 1 mecanismo son las medidas originales; las de 2 y 3
+mecanismos son de wavesim solo (el nuevo ajuste con tiempos de relajación
+optimizados y un peso por mecanismo), sin k-Wave en esa sesión. Los valores
+absolutos de α y las velocidades de fase con 2 mecanismos de la tabla original
+se han retirado porque el ajuste cambió.
+
+Tiempos (medida original): k-Wave 91.5 s, wavesim 6.3 s (1 mec.) y 7.9 s (2 mec.).
+Con el ajuste nuevo, 2 mecanismos cuestan ×1.49 y 3 mecanismos ×1.72 respecto de 1
+en una tibia de 24×22 mm a 3 MHz (`atenuacion.md`).
 
 Lectura:
 
-- **Con un mecanismo (el valor por defecto) wavesim reproduce la ley
-  nominal con errores de +0.4 a +8 %**, coherente con el "±12 %" del README.
-  Con dos mecanismos el error baja a ±5 % (±3 % salvo en el borde de banda
-  de 0.7 MHz). Esta es la mejor evidencia numérica de que `n_mechanisms=2`
-  merece ser el valor para estudios cuantitativos.
+- **Con un mecanismo wavesim reproduce la ley nominal con errores de +0.4 a
+  +8 %.** Con el ajuste nuevo, dos mecanismos dan errores de −1.5 a +1.1 % en
+  este caso (antes −2.1 a +4.9 %) y tres de −1.7 a +0.2 %. Esta es la
+  evidencia que llevó a poner `n_mechanisms=2` por defecto (el error de la
+  banda del pulso es ≤ 2 % para cualquier exponente de 1 a 2). Es una
+  comparación de wavesim con la ley nominal, no con k-Wave.
 - **k-Wave tampoco clava el valor nominal en este montaje**: α medida −7.7 %
   y velocidad de fase 3.6 % por encima del valor `sound_speed` (1633-1638
   frente a 1580 m/s). En k-Wave el `sound_speed` con absorción con
@@ -424,10 +599,14 @@ Lectura:
 
 ### 10.4 Qué no cubre
 
-No se comparó: ondas S, conversión de modo, hueso, interfaces rugosas,
-speckle, B-mode ni ninguna otra modalidad. k-wave-python 0.6.2 no contiene el
-solver elástico, así que la comparación en el hueso exige MATLAB (k-Wave
-`pstdElastic2D`) o SimSonic.
+No se comparó con k-Wave: ondas S, conversión de modo, hueso, interfaces
+rugosas, speckle, B-mode ni ninguna otra modalidad (las ondas S y guiadas se han
+verificado después frente a soluciones analíticas, no frente a k-Wave).
+k-wave-python 0.6.2 no contiene el solver elástico, así que la comparación en
+el hueso exige MATLAB (k-Wave `pstdElastic2D`) o SimSonic. Tampoco se ha
+ejecutado ningún otro simulador (SimSonic, Field II, gprMax, Meep, MCX, GATE,
+KomaMRI, EIDORS...); la única otra referencia externa ejecutada es SpekPy 2.5.4
+para los espectros de rayos X.
 
 Para repetirlo: `python benchmarks/kwave_comparison.py` (≈ 3-4 min en 4
 núcleos con el backend Python).
@@ -437,44 +616,52 @@ núcleos con el backend Python).
 Criterios de aceptación propuestos. Son umbrales de partida, a ajustar
 cuando se vea el ruido de cada caso.
 
+Estado: **hecho** = ejecutado con su criterio cumplido; **parcial** = ejecutado
+con alguna cifra fuera de tolerancia o sin la referencia externa prevista;
+**pendiente** = no ejecutado. «Referencia» es la propuesta original; cuando se
+hizo sin el simulador externo se indica.
+
 ### 11.1 Ultrasonido
 
-| # | Caso | Referencia | Métricas | Umbral propuesto |
+| # | Caso | Referencia | Umbral propuesto | Estado y resultado |
 |---|---|---|---|---|
-| U1 | Dos capas fluidas, onda plana (hecho, §10.2) | Analítico y k-Wave | R, T; Δt de llegada; error L2 tras alinear | ≤ 3 % a 15 puntos/λ en R y forma, ≤ 0.5 % en T (cumplido: R 1.3 %, T 0.06 %, forma 1.9-2.9 %) |
-| U2 | Fuente puntual con atenuación (hecho, §10.3) | Ley nominal; k-Wave | α(f) y c(f) | ≤ 5 % con 2 mecanismos |
-| U3 | Convergencia: variar dx y CFL; orden observado | Analítico | Pendiente log-log del error | ≥ 2 |
-| U4 | Semiespacio elástico (agua-cortical): R(θ) y T(θ) de P y S, ángulo crítico | Fórmulas de Zoeppritz/Snell, SimSonic, k-Wave `pstdElastic2D` (MATLAB) | Amplitudes, ángulos críticos, conversión P↔S | ≤ 3 % en amplitud, ≤ 1° |
-| U5 | Placa libre y sumergida en agua (cortical de 2-4 mm): curvas de dispersión S0/A0, 100-500 kHz | Ecuaciones de Rayleigh-Lamb (raíces), SimSonic o COMSOL | Velocidad de grupo/fase de S0 y A0, f-k | ≤ 2 % |
-| U6 | Transmisión axial en cortical con capa de tejido blando (primer arribo, velocidad de la onda lateral) | Bossy et al. 2004; Fotiadis et al. | SOS; comparar la tendencia con la profundidad de cortical (1-1.5 mm) | Reproduce los intervalos publicados |
-| U7 | Fractura transversal con hueco de ancho w (0.1-2 mm), 200 kHz | Dodd et al. y Humphrey et al. (pérdida de transmisión, FTL) y Li et al. 2017 (razón S0/A0) | FTL(dB) frente a w; razón S0/A0 | Misma tendencia; diferencia < 3 dB |
-| U8 | Benchmark transcraneal BM1-BM2 (hueso planar en agua), con `cs = 0` para igualar el modelo compresional | Aubry et al. 2022 (datos en Zenodo) | Presión focal y posición | < 10 % y < 1 mm (el nivel de acuerdo entre códigos publicado) |
-| U9 | B-mode de dispersor puntual y de región con speckle | Field II (FWHM axial/lateral) y k-Wave | FWHM, CNR, SNR de speckle (Rayleigh ≈ 1.91) | FWHM ≤ 10 % |
+| U1 | Dos capas fluidas, onda plana | Analítico y k-Wave | ≤ 3 % a 15 ppw en R y forma, ≤ 0.5 % en T | **Hecho** (§10.2, versión anterior de wavesim): R 1.3 %, T 0.06 %, forma 1.9-2.9 %. No repetido con k-Wave |
+| U2 | Fuente puntual con atenuación | Ley nominal; k-Wave | ≤ 5 % con 2 mecanismos | **Hecho** (§10.3 y [atenuacion](validacion/atenuacion.md)): 2 mecanismos −1.5 a +1.1 %; onda plana 1D ≤ 2.2 % en la banda estrecha |
+| U3 | Convergencia: dx y CFL; orden observado | Analítico | Pendiente ≥ 2 | **Hecho** ([elastico](validacion/elastico.md)): c 1.84 → 1.96, R agua-cortical 1.94-2.83; velocidad igual a la del esquema a 1e-6 |
+| U4 | Semiespacio agua-cortical: R(θ), T(θ) de P y S, críticos | Zoeppritz/Snell (sin SimSonic ni k-Wave elástico) | ≤ 3 % en amplitud, ≤ 1° | **Parcial**: \|R\| ≤ 0.7 % hasta 22°; 28-53° ≤ 3.9 % (≤ 1.2 % en los ángulos de la tabla); 59-70° ≤ 5 %; ±3° de los críticos 9-17 %; crítico P a ±0.15°. Tras corregir un error real del solver en la interfaz oblicua |
+| U5 | Placa libre y sumergida (3 mm): Lamb S0/A0, 100-500 kHz | Rayleigh-Lamb (sin SimSonic ni COMSOL) | ≤ 2 % | **Hecho**: libre ≤ 1.3 % / 1.7 % con 30 celdas (con 20: S0 8.7 %); en agua ≤ 0.42 % / 0.39 % (S0 hasta 350 kHz) |
+| U6 | Transmisión axial con tejido blando: primer arribo, onda lateral | Bossy et al. 2004; Fotiadis et al. | Reproduce los intervalos publicados | **Parcial** ([elastico3d](validacion/elastico3d.md)): 3D a 0.5 MHz, FAS de 3518 m/s (tubo) frente a 3508 (placa); decae como d^−2.97 (3D) frente a d^−1.87 (2D). Sin comparar con Bossy (no verificado si afirman lo mismo); sin 1 MHz ni tubo anisótropo |
+| U7 | Fractura transversal con hueco w (0.1-2 mm), 200 kHz | Dodd, Humphrey, Li | Misma tendencia; < 3 dB | **Parcial**: una sola fractura de 1 mm a 0.5 MHz, −3 a −7 dB y +0.3 µs de retardo, tendencia coherente con la publicada (cifras en dB no verificadas); sin barrido de w ni razón S0/A0 |
+| U8 | Benchmark transcraneal BM1-BM2 | Aubry et al. 2022 | < 10 % y < 1 mm | **Pendiente** |
+| U9 | B-mode de dispersor puntual y de speckle | Field II y k-Wave | FWHM ≤ 10 %, SNR ≈ 1.91 | **Parcial** ([imagen_ultrasonido](validacion/imagen_ultrasonido.md)): FWHM lateral ≤ 12 % de la teoría; axial **+9 a +17 %** (no cumple; interfaz plana +1.9 %); SNR de speckle 1.85 ± 0.10 (Hann). Sin Field II: la referencia es la teoría de apertura |
 
 ### 11.2 Resto de modalidades
 
-| Modalidad | Caso | Referencia | Métricas |
+| Modalidad | Caso | Referencia | Estado y resultado |
 |---|---|---|---|
-| Maxwell | Losa plana multicapa (piel/grasa/músculo/hueso) a 128 MHz y 2.45 GHz | Cálculo analítico por matriz de transferencia; Meep 2D (TM) y openEMS | Módulo y fase del campo a lo largo de una línea, coeficiente de transmisión (dB), SAR pico relativo |
-| Maxwell | Cilindro dieléctrico (músculo) en onda plana | Solución de Mie 2D | Error del campo interior y del scattering |
-| Óptica | Losa homogénea y de dos capas (μa, μs', g, n de músculo/grasa) | MCX (3D, volumen ancho) y MCML | Perfil de fluencia en profundidad (en escala logarítmica), transmitancia difusa, ignorando la zona de 1-2 caminos libres medios de transporte alrededor de fuentes y fronteras |
-| Rayos X | Cilindros de agua/hueso/aire con espectro de 80 kVp | NIST XCOM (analítico), MC-GPU o GATE para scatter | HU de cada tejido, cupping, perfil de ruido, RMSE de la FBP con ASTRA/TIGRE, MTF |
-| RM | Mismas T1/T2/PD con SE, IR, GRE | KomaMRI.jl y JEMRIS | Señal por voxel (error relativo < 1 %), PSF, estadística de Rice del ruido |
-| Fantomas | Espesores, fracciones de tejido y radios óseos del corte | Medidas de VP/XCAT (o literatura) | Distribución de espesores; no pretende igualar un sujeto |
-| EIT | Disco homogéneo con inclusión | Solución analítica y EIDORS/pyEIT | Tensiones de contorno, condicionamiento |
+| Maxwell | Losa multicapa (piel/grasa/músculo/hueso) a 128 MHz y 2.45 GHz | Matriz de transferencia; Meep y openEMS | **Hecho** frente a la matriz de transferencia ([maxwell](validacion/maxwell.md)): ≤ 0.11 dB y 0.9° (banda estrecha), ≤ 0.31 dB en 0.1-10 GHz (banda ancha, dx 0.125 mm). **Pendiente** Meep/openEMS |
+| Maxwell | Cilindro dieléctrico en onda plana | Mie 2D | **Hecho**: 1.7-3.3 % dentro del cilindro con 15-20 ppw y sub-celda (sin sub-celda 6-11 %); ~0.8 % fuera en el hueso sin explicar |
+| Óptica | Losa homogénea y de dos capas | MCX y MCML | **Parcial** ([optica](validacion/optica.md)): frente a van de Hulst (tabla 35), Fresnel exacto y balístico, no frente a MCX ni MCML ejecutados; la losa dispersiva con n = 1.5 no tiene referencia verificada |
+| Rayos X | Cilindros agua/hueso/aire a 80 kVp | NIST XCOM, MC-GPU o GATE; ASTRA/TIGRE; MTF | **Parcial** ([rayos_x](validacion/rayos_x.md)): HU y NIST < 1.5 %, FBP exacta, abanico = paralelo, MTF y NPS; espectro frente a SpekPy (±5 % a 80-120 kVp, −6.6/−5.2 % a 50/70 kVp). **Pendiente**: scatter frente a MC-GPU/GATE, FBP frente a ASTRA |
+| RM | T1/T2/PD con SE, IR, GRE | KomaMRI.jl y JEMRIS | **Parcial** ([rm](validacion/rm.md)): frente a las ecuaciones de señal (1e-11), al desplazamiento químico esperado y al cilindro de susceptibilidad exacto; **pendiente** KomaMRI/JEMRIS (Julia y C++ no disponibles) |
+| Fantomas | Espesores, fracciones y radios óseos | VP/XCAT o literatura | **Pendiente** |
+| EIT | Disco homogéneo con inclusión | Analítico y EIDORS/pyEIT | **Parcial** ([eit](validacion/eit.md)): CEM frente a la serie de Fourier ≤ 1.5 % y electrodos puntuales ≤ 1.3 %; GN con métricas GREIT. **Pendiente** EIDORS/pyEIT |
 
-### 11.3 Orden de trabajo sugerido
+### 11.3 Orden de trabajo (actualizado)
 
-1. Fijar el arnés (el script actual) y añadir U3, U4 y U5: son lo que
-   diferencia a wavesim de k-wave-python (el elástico) y se pueden
-   comprobar analíticamente sin software externo.
-2. Obtener SimSonic (o su equivalente) para U6-U7: son los casos relevantes
-   para el objetivo del proyecto (fractura en hueso largo).
-3. Maxwell, óptica y rayos X con soluciones analíticas y herramientas libres
-   (Meep, MCX, ASTRA): no requieren licencias comerciales.
-4. Registrar cada caso como test en `tests/` cuando tenga umbral estable, y
-   guardar las trazas de referencia (no los binarios) para que la
-   validación no dependa de instalar el simulador externo.
+1. **Hecho:** el arnés y U3, U4 (con excepciones) y U5, que se comprueban
+   analíticamente sin software externo; Maxwell frente a la matriz de
+   transferencia y Mie; óptica frente a van de Hulst; rayos X, RM y EIT frente a
+   soluciones exactas o internas.
+2. **Pendiente, lo que más falta:** ejecutar de verdad otro simulador y comparar
+   señal a señal: SimSonic (U6-U7, fractura en hueso largo), k-Wave elástico
+   (MATLAB), Field II (U9), MCX, gprMax o Meep, KomaMRI, EIDORS. Hasta entonces toda la
+   validación es interna.
+3. Barrido de la anchura de la fractura (U7), 1 MHz y tubo anisótropo en U6,
+   benchmark transcraneal U8 y fantomas frente a VP/XCAT.
+4. Registrar cada caso como test en `tests/` cuando tenga umbral estable (ya
+   hecho para los casos rápidos de cada documento de `docs/validacion/`) y
+   guardar las trazas de referencia, no los binarios.
 
 ## 12. Referencias
 
