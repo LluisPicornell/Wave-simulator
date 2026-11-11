@@ -8,9 +8,9 @@ Instalación de la dependencia (sólo para este benchmark; NO está en pyproject
 Uso (desde la raíz del repositorio; para guardar las trazas de referencia, ``cross_ultrasonido.py``):
 
     NUMBA_NUM_THREADS=1 PYTHONPATH=$(pwd) venv_kwave/bin/python benchmarks/kwave_comparison.py               # todo
-    ... benchmarks/kwave_comparison.py --case layers    # sólo las dos capas (A, ~3 min)
+    ... benchmarks/kwave_comparison.py --case layers    # sólo las dos capas (A, ~7 min; 4.5 de ellos, k-Wave a 0.05 mm)
     ... benchmarks/kwave_comparison.py --case point     # fuente puntual con atenuación (B, ~4 min)
-    ... benchmarks/kwave_comparison.py --case tissue    # medio tipo tejido (C, ~2 min)
+    ... benchmarks/kwave_comparison.py --case tissue    # medio tipo tejido (C, ~8 min con dx = 0.05 mm)
     ... --backend cpp   # binario C++ de k-Wave (necesita libhdf5_serial_hl.so.100; aquí era más lento)
 
 Casos (resultados en ``docs/validacion/cruzada_ultrasonido.md``):
@@ -567,7 +567,8 @@ def main():
     if args.case in ("all", "point"):
         print_point(case_point(0.1e-3, args.backend))
     if args.case in ("all", "tissue"):
-        print_tissue(case_tissue(0.1e-3, args.backend))
+        for dx in (0.10e-3, 0.05e-3):
+            print_tissue(case_tissue(dx, args.backend))
 
 
 if __name__ == "__main__":

@@ -10,9 +10,9 @@ se instalan en entornos aparte que ven el NumPy/Numba del sistema (para wavesim)
 Uso (desde la raíz del repositorio; ``--save`` reescribe ``benchmarks/data/cross_ultrasonido/``):
 
     NUMBA_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONPATH=$(pwd) venv_kwave/bin/python \\
-        benchmarks/cross_ultrasonido.py --tool kwave [--case A,B,C] [--save]       # ~TKW min
+        benchmarks/cross_ultrasonido.py --tool kwave [--case A,B,C] [--save]       # ~18 min
     NUMBA_NUM_THREADS=1 OMP_NUM_THREADS=1 PYTHONPATH=$(pwd) venv_devito/bin/python \\
-        benchmarks/cross_ultrasonido.py --tool devito [--case D1,D2] [--save]      # ~TDV min
+        benchmarks/cross_ultrasonido.py --tool devito [--case D1,D2] [--save]      # ~23 min
 
 Sin las herramientas, ``tests/test_cross_ultrasonido.py`` compara wavesim con los datos guardados.
 
@@ -275,11 +275,19 @@ def run_d2(dxs=D2_DXS, with_devito=True):
     return out
 
 
+#: Por encima, S0 en agua pierde tanta energía (Im k = 77 1/m a 375 kHz, 107 a 400) que el máximo f-k supera el$
+#: umbral de prominencia sin ser el modo: a 0.10 mm, 375-400 kHz daban de −3 a −8 % en todos los códigos
+D2_S0_MAX = 350e3
+
+
 def d2_errors(res, name, fam):
     """Error relativo frente a Rayleigh-Lamb con carga de agua donde el modo está resuelto (NaN si no)."""
     d = res[name][fam]
     e = d["c"] / res["ref"][fam] - 1
-    return np.where(d["prom"] >= ev.U5_MIN_PROMINENCE, e, np.nan)
+    ok = d["prom"] >= ev.U5_MIN_PROMINENCE
+    if fam == "S":
+        ok &= ev.U5_FREQS <= D2_S0_MAX
+    return np.where(ok, e, np.nan)
 
 
 def print_d2(out):
