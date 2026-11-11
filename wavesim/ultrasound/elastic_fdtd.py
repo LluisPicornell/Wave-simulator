@@ -53,7 +53,31 @@ C1, C2 = 9.0 / 8.0, -1.0 / 24.0
 #: (Bécache, Fauqueux & Joly, J Comput Phys 188:399, 2003). El análisis de autovalores de la capa con
 #: coeficientes congelados y las simulaciones de 40 000 pasos piden p ≥ 0.3-0.5
 #: (``docs/validacion/estabilidad.md``). Precio: la capa refleja más (−53 dB en agua, −28 dB en hueso).
+#: Por defecto (``pml_ratio=None``) sólo se activa si hace falta (``_layer_crosses_pml``): así los
+#: montajes sin capas sólidas en la CPML (tejido blando, sólidos homogéneos, semiespacios) no cambian.
 PML_RATIO = 0.5
+
+
+def _layer_crosses_pml(solid: np.ndarray, npml: int) -> bool:
+    """¿Hay en alguna franja CPML una capa sólida limitada por fluido a los dos lados, a lo largo de la franja?
+
+    Es la geometría de guía de ondas con modos retrógrados (placa, cortical entre tejido blando y médula). Un
+    sólido homogéneo o un semiespacio que llega al borde exterior no la tiene y es estable con la CPML clásica.
+    """
+    if npml <= 0 or not solid.any():
+        return False
+    strips = [solid[:, :npml], solid[:, -npml:], solid[:npml, :].T, solid[-npml:, :].T]
+    for st in strips:
+        # a lo largo de cada columna de la franja: sólido con fluido antes y después
+        idx = np.arange(st.shape[0])[:, None]
+        has = st.any(axis=0)
+        if not has.any():
+            continue
+        first = np.where(st, idx, st.shape[0]).min(axis=0)
+        last = np.where(st, idx, -1).max(axis=0)
+        if np.any(has & (first > 0) & (last < st.shape[0] - 1)):
+            return True
+    return False
 
 #: Cada derivada con CPML: (eje, ¿nodo desplazado media celda a lo largo del eje?, ¿y a lo largo del otro?).
 #: Las de tensión viven en los nodos de velocidad (vx en (i+1/2, j), vz en (i, j+1/2)) y las de velocidad
@@ -140,8 +164,8 @@ class ElasticSolver:
         dtype=np.float32,
         backend: str = "auto",
         anisotropic_bone: bool = False,
-        pml_ratio: float = PML_RATIO,
-    ):
+        pml_ratio: float | None = None,
+    ):  # ``pml_ratio``: cociente de la M-PML; None = ``PML_RATIO`` sólo si una capa sólida cruza la CPML
         self.backend = self._resolve_backend(backend, dtype)
         self.phantom = phantom
         self.grid = phantom.grid
@@ -228,6 +252,9 @@ class ElasticSolver:
         self.tmp_x = np.zeros((shape[0], shape[1] - 3), dtype)
         self.tmp_z = np.zeros((shape[0] - 3, shape[1]), dtype)
 
+        if pml_ratio is None:
+            pml_ratio = PML_RATIO if _layer_crosses_pml(mu_u > 0, npml) else 0.0
+        self.pml_ratio = float(pml_ratio)
         cp_kw = dict(npml=npml, dx=dx, dt=dt, c_max=cp_u_max, f_ref=f0, dtype=dtype, ratio=pml_ratio)
         # (eje, nodo desplazado a lo largo del eje, nodo desplazado a lo largo del otro eje)
         self.pml = {
