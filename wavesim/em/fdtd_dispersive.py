@@ -124,12 +124,15 @@ class BroadbandMaxwellTMSolver(YeeTMGrid):
       (p. ej. promediados en las interfaces con ``em.subpixel``); deben usar los
       polos del modelo o traer los suyos.
 
+    - ``backend``: ``"auto"`` (Numba si está instalado), ``"numpy"`` o ``"numba"``; en float64 dan el
+      mismo resultado salvo redondeo.
+
     La CPML usa ``f_ref = f_min`` para el término CFS: así absorbe toda la banda.
     """
 
     def __init__(self, phantom: Phantom, band: tuple[float, float], n_poles: int | None = None, npml: int = 20,
                  cfl: float = 0.95, dtype=np.float64, model: TissueDebyeModel | None = None,
-                 medium: DebyeMedium | None = None):
+                 medium: DebyeMedium | None = None, backend: str = "auto"):
         self.band = (float(band[0]), float(band[1]))
         if medium is None:
             model = model or tissue_debye_model(self.band, n_poles)
@@ -145,7 +148,7 @@ class BroadbandMaxwellTMSolver(YeeTMGrid):
         if self.points_per_wavelength < 10:
             warnings.warn(f"Sólo {self.points_per_wavelength:.1f} puntos por longitud de onda a f_max en el tejido: "
                           "reduce dx.", stacklevel=2)
-        self._setup_yee(phantom, npml, cfl, dtype, f_ref=self.band[0])
+        self._setup_yee(phantom, npml, cfl, dtype, f_ref=self.band[0], backend=backend)
         dt = self.dt
         # Sólo se integran los polos que tienen amplitud en alguna celda
         active = [k for k in range(medium.n_poles) if np.any(medium.delta_eps[k] > 0)]
@@ -231,21 +234,28 @@ class BroadbandMaxwellTMSolver(YeeTMGrid):
         t0_wall = time.time()
         steps = nt
         has_poles = self.j_pol.shape[0] > 0
+        numba = self.backend == "numba"
         for n in range(nt):
-            curl = self._curl_h()
-            if has_poles:
-                curl -= np.tensordot(self.g, self.j_pol, axes=1)
-                np.copyto(self._e_old, self.ey)
-            self.ey *= self.ca
-            self.ey += self.cb * curl
             t_src = (n + 0.5) * self.dt
+            src = None
             if t_src <= t_pulse:
-                self.ey[self._src_j, self._src_i] -= self._src_scale * wideband_pulse(t_src, f_lo, f_hi, edge_db)
-            if has_poles:
-                self.j_pol *= self.kappa[:, None, None]
-                np.subtract(self.ey, self._e_old, out=self._e_old)
-                np.multiply(self.beta, self._e_old, out=self._tmp)
-                self.j_pol += self._tmp
+                src = self._src_scale * wideband_pulse(t_src, f_lo, f_hi, edge_db)
+            if numba:
+                self._advance_h()
+                if has_poles:
+                    self._nk.step_e_debye(self.ey, self.hx, self.hz, self.ca, self.cb, self.inv_dx,
+                                          self._pk["hx_z"], self._pk["hz_x"], self.j_pol, self.kappa, self.beta,
+                                          self.g)
+                else:
+                    self._nk.step_e(self.ey, self.hx, self.hz, self.ca, self.cb, self.inv_dx,
+                                    self._pk["hx_z"], self._pk["hz_x"])
+                if src is not None:
+                    self.ey[self._src_j, self._src_i] -= src
+                    if has_poles:
+                        # J_k es lineal en Ey^{n+1}: el kernel no vio la fuente, se añade su parte aquí
+                        self.j_pol[:, self._src_j, self._src_i] -= self.beta[:, self._src_j, self._src_i] * src
+            else:
+                self._step_numpy(has_poles, src)
             if n % stride == 0:
                 buf[nb] = self.ey.ravel() if sel is None else self.ey[sel]
                 t_buf[nb] = (n + 1) * self.dt
@@ -280,6 +290,22 @@ class BroadbandMaxwellTMSolver(YeeTMGrid):
         rho = self.phantom.property_map(lambda k: ACOUSTIC[k].density, physics="acoustic")
         return BroadbandEMResult(freqs, phasor, points, self.medium, spectrum, self.dt, steps,
                                  time.time() - t0_wall, rho)
+
+    def _step_numpy(self, has_poles: bool, src: np.ndarray | None) -> None:
+        """Un paso con NumPy: Ey con la fuente ``src`` ya escalada (o ``None``) y luego las corrientes J_k."""
+        curl = self._curl_h()
+        if has_poles:
+            curl -= np.tensordot(self.g, self.j_pol, axes=1)
+            np.copyto(self._e_old, self.ey)
+        self.ey *= self.ca
+        self.ey += self.cb * curl
+        if src is not None:
+            self.ey[self._src_j, self._src_i] -= src
+        if has_poles:
+            self.j_pol *= self.kappa[:, None, None]
+            np.subtract(self.ey, self._e_old, out=self._e_old)
+            np.multiply(self.beta, self._e_old, out=self._tmp)
+            self.j_pol += self._tmp
 
     def _flush(self, acc_re, acc_im, buf, t_buf, nb, w, stride):
         # DFT por bloques: dos productos de matrices reales en vez de nf sumas por paso
