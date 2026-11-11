@@ -424,7 +424,7 @@ def report_cylinder(r: dict) -> None:
 # --------------------------------------------------------------------------
 # 3. Pierna (SAR)
 # --------------------------------------------------------------------------
-def leg_wavesim(dx: float, model, f0: float = F0, margin: float = 30e-3) -> dict:
+def leg_wavesim(dx: float, model, f0: float = F0, margin: float = 30e-3, broadband: bool = True) -> dict:
     """``|E|`` y SAR (por V/m incidente en el centro, sin la pierna) de wavesim; nativos y colocados como gprMax."""
     p = cross_section_limb("pierna", dx=dx, margin=margin)
     g = p.grid
@@ -439,19 +439,22 @@ def leg_wavesim(dx: float, model, f0: float = F0, margin: float = 30e-3) -> dict
     ref = MaxwellTMSolver(col, f0, eps_map=np.full(col.grid.shape, eps_w))
     ref.set_plane_wave_source(z=z_src)
     e_ref = ref.run().phasor[:, 2]
-    b = BroadbandMaxwellTMSolver(p, FIELD_BAND, model=model)
-    b.set_plane_wave_source(z=z_src)
-    rb = b.run(np.array([f0]))
-    mon = np.zeros(col.grid.shape, bool)
-    mon[:, 2] = True
-    rr = BroadbandMaxwellTMSolver(col, FIELD_BAND, model=model)
-    rr.set_plane_wave_source(z=z_src)
-    e_ref_bb = rr.run(np.array([f0]), monitor=mon).phasor[0]
+    runs = [("nb", r.phasor, e_ref)]
+    tm_bb = float("nan")
+    if broadband:
+        b = BroadbandMaxwellTMSolver(p, FIELD_BAND, model=model)
+        b.set_plane_wave_source(z=z_src)
+        rb = b.run(np.array([f0]))
+        mon = np.zeros(col.grid.shape, bool)
+        mon[:, 2] = True
+        rr = BroadbandMaxwellTMSolver(col, FIELD_BAND, model=model)
+        rr.set_plane_wave_source(z=z_src)
+        runs.append(("bb", rb.phasor[0], rr.run(np.array([f0]), monitor=mon).phasor[0]))
+        tm_bb = rb.elapsed_s
     sigma = -eps_map.imag * 2 * np.pi * f0 * dielectric.EPS0
     rho = p.property_map(lambda k: ACOUSTIC[k].density, physics="acoustic")
-    out = dict(g=g, labels=p.labels, centre=centre, sigma=sigma, rho=rho, tm_nb=r.elapsed_s, tm_bb=rb.elapsed_s,
-               e_w=abs(eps_w))
-    for name, e, er in (("nb", r.phasor, e_ref), ("bb", rb.phasor[0], e_ref_bb)):
+    out = dict(g=g, labels=p.labels, centre=centre, sigma=sigma, rho=rho, tm_nb=r.elapsed_s, tm_bb=tm_bb)
+    for name, e, er in runs:
         j = centre[0]
         nat = e / er[j]
         col_e = avg4(e) / (0.5 * (er[j] + er[j + 1]))  # colocado en el centro de la celda, como gprMax
@@ -501,13 +504,13 @@ def diff_stats(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> tuple[float, f
     return float(np.median(rel)), float(np.percentile(rel, 95))
 
 
-def run_leg(gp: GprMax | None, dx: float) -> dict:
+def run_leg(gp: GprMax | None, dx: float, broadband: bool = True) -> dict:
     model = dispersive.tissue_debye_model(FIELD_BAND)
-    w = leg_wavesim(dx, model)
+    w = leg_wavesim(dx, model, broadband=broadband)
     sl = (slice(ev.NPML, -ev.NPML), slice(ev.NPML, -ev.NPML))
     inner = w["labels"][sl]
     res = dict(dx=dx, labels=inner.astype(np.int8), tm_nb=w["tm_nb"], tm_bb=w["tm_bb"])
-    for k in ("E_nb", "SAR_nb", "Ec_nb", "SARc_nb", "E_bb", "SAR_bb", "Ec_bb", "SARc_bb"):
+    for k in [k for k in w if k.startswith(("E_", "Ec_", "SAR_", "SARc_"))]:
         res[k] = w[k][sl].astype(np.float32)
     if gp is None:
         old = _load(f"leg_dx{dx * 1e3:g}mm")
@@ -516,7 +519,9 @@ def run_leg(gp: GprMax | None, dx: float) -> dict:
     res.update(leg_gprmax(gp, w, dx, model))
     res = {k: (v.astype(np.float32) if isinstance(v, np.ndarray) and v.dtype == np.float64 else v)
            for k, v in res.items()}
-    _save(f"leg_dx{dx * 1e3:g}mm", **res)
+    # sólo se guardan los mapas de gprMax (los de wavesim se recalculan y ocuparían varios MB)
+    keep = ("dx", "labels", "Ec_gp", "SARc_gp", "tm_gp", "tm_gp_wall", "tail")
+    _save(f"leg_dx{dx * 1e3:g}mm", **{k: res[k] for k in keep})
     return res
 
 
@@ -525,7 +530,7 @@ def leg_table(r: dict) -> list[tuple]:
     allc = np.ones_like(body)
     rows = []
     for tag, m in (("pierna (sin agua)", body), ("todo el dominio", allc)):
-        for code in ("nb", "bb"):
+        for code in [c for c in ("nb", "bb") if f"E_{c}" in r]:
             for qty, key in (("|E|", "Ec"), ("SAR", "SARc")):
                 a, b = (r[f"{key}_{c}"].astype(float)[:-1, :-1] for c in (code, "gp"))
                 med, p95 = diff_stats(a, b, m[:-1, :-1])
@@ -546,14 +551,16 @@ def report_leg(r: dict) -> None:
     print("\nSAR pico en la pierna (W/kg por (V/m)^2 incidente en el centro), y su celda (fila, columna):")
     for key, name in (("SARc_gp", "gprMax"), ("SARc_nb", "wavesim estrecha"), ("SARc_bb", "wavesim ancha"),
                       ("SAR_nb", "wavesim estrecha (nativo, sin colocar)")):
+        if key not in r:
+            continue
         a = np.where(body, r[key].astype(float), np.nan)
         a[-1, :] = np.nan
         a[:, -1] = np.nan
         j, i = np.unravel_index(np.nanargmax(a), a.shape)
         print(f"- {name}: {np.nanmax(a):.4g} en ({j}, {i})")
     pk = lambda key: np.nanmax(np.where(body[:-1, :-1], r[key].astype(float)[:-1, :-1], np.nan))  # noqa: E731
-    print(f"- cociente de picos wavesim estrecha / gprMax: {pk('SARc_nb') / pk('SARc_gp'):.4f}; "
-          f"ancha / gprMax: {pk('SARc_bb') / pk('SARc_gp'):.4f}")
+    print(f"- cociente de picos wavesim estrecha / gprMax: {pk('SARc_nb') / pk('SARc_gp'):.4f}"
+          + (f"; ancha / gprMax: {pk('SARc_bb') / pk('SARc_gp'):.4f}" if "SARc_bb" in r else ""))
     nat = diff_stats(r["E_nb"].astype(float)[:-1, :-1], r["Ec_gp"].astype(float)[:-1, :-1], body[:-1, :-1])
     print(f"Sin colocar (|E| nativo de wavesim en el nodo frente al de gprMax en el centro de la celda, desfase de "
           f"media celda): mediana {nat[0] * 100:.2f} %, p95 {nat[1] * 100:.2f} %")
