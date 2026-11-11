@@ -8,7 +8,7 @@ Uso (desde la raíz del repositorio; Numba opcional, sin él sólo se mide NumPy
 Casos de ``fdtd`` (los de ``tests/test_em.py`` y ``benchmarks/em_validation.py``):
 
 - ``plana``: onda plana en músculo a 2.45 GHz (el test de ``test_em.py``).
-- ``losa``: losa piel/grasa/músculo/cortical, banda estrecha 2.45 GHz a dx = 0.25 mm y banda ancha 0.1-10 GHz a dx = 0.25 mm.
+- ``losa``: losa piel/grasa/músculo/cortical, banda estrecha 2.45 GHz y banda ancha 0.1-10 GHz (dx = 0.25 mm).
 - ``mie``: cilindro de músculo (a = 20 mm) a 2.45 GHz con 15 puntos por longitud de onda y el de banda ancha 0.5-3 GHz.
 
 Cada caso se ejecuta con el backend NumPy y con el de Numba (ya compilado: se calienta antes) y se imprime la

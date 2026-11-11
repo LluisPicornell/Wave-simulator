@@ -67,7 +67,7 @@ def prolong_add(x, xc, w):
 
 @njit(cache=True)
 def dense_apply(out, m, v):
-    """``out = m @ v`` sin BLAS: en el nivel más grueso (decenas de celdas) las llamadas multihilo cuestan más que el producto."""
+    """``out = m @ v`` sin BLAS: en el nivel más grueso las llamadas multihilo cuestan más que el producto."""
     n = v.size
     for a in range(n):
         s = m[a, 0] * v[0]

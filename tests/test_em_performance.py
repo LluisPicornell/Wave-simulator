@@ -88,3 +88,65 @@ def test_maxwell_backend_invalido():
         warnings.simplefilter("ignore")
         assert MaxwellTMSolver(p, 2.45e9, npml=4, dtype=np.float32).backend == "numpy"
         assert MaxwellTMSolver(p, 2.45e9, npml=4).backend == "numba"
+
+
+# --------------------------------------------------------------------------
+# Cuasi-estático: multigrid como precondicionador del COCG
+# --------------------------------------------------------------------------
+def _disco_con_piel(n=60, dx=1e-3):
+    """Disco de músculo con piel y grasa (contraste ~100 en la admitividad) en aire."""
+    from wavesim.em import QuasiStaticSolver
+
+    g = Grid2D(n, n, dx, x0=-n * dx / 2, z0=-n * dx / 2)
+    xx, zz = g.meshgrid()
+    r = np.hypot(xx, zz)
+    lab = np.full(g.shape, TISSUE_INDEX["air"], np.int16)
+    lab[r <= 26e-3] = TISSUE_INDEX["skin"]
+    lab[r <= 24e-3] = TISSUE_INDEX["fat"]
+    lab[r <= 20e-3] = TISSUE_INDEX["muscle"]
+    p = Phantom(g, lab)
+    return p, {k: QuasiStaticSolver(p, 50e3, preconditioner=k) for k in ("jacobi", "multigrid")}
+
+
+def _fuente(p, solver):
+    b = np.zeros(p.grid.shape, complex)
+    j0 = np.flatnonzero(solver.tissue.any(axis=1))
+    b[j0[0], p.grid.nx // 2] = 1.0
+    b[j0[-1], p.grid.nx // 2] = -1.0
+    return b
+
+
+def test_multigrid_misma_solucion_con_menos_iteraciones():
+    p, s = _disco_con_piel()
+    b = _fuente(p, s["jacobi"])
+    rj = s["jacobi"].solve(b, tol=1e-10)
+    rm = s["multigrid"].solve(b, tol=1e-10)
+    assert rm.residual < 1e-10
+    assert rm.iterations * 3 < rj.iterations
+    assert np.abs(rj.phi - rm.phi).max() < 1e-7 * np.abs(rj.phi).max()
+
+
+def test_multigrid_con_celdas_fijas_y_shunt():
+    from wavesim.em import QuasiStaticSolver
+
+    p, s = _disco_con_piel()
+    t = s["jacobi"].tissue
+    fixed = np.zeros(t.shape, bool)
+    fixed[t.argmax(axis=0)[30], 30] = True
+    b = _fuente(p, s["jacobi"])
+    ra = s["jacobi"].solve(b, fixed=fixed, fixed_values=0.5, tol=1e-10)
+    rb = s["multigrid"].solve(b, fixed=fixed, fixed_values=0.5, tol=1e-10)
+    assert np.abs(ra.phi - rb.phi).max() < 1e-7 * np.abs(ra.phi).max()
+    shunt = np.where(t, 1e-2, 0.0)
+    sj = QuasiStaticSolver(p, 50e3, shunt=shunt, preconditioner="jacobi")
+    sm = QuasiStaticSolver(p, 50e3, shunt=shunt, preconditioner="multigrid")
+    ra, rb = sj.solve(b, tol=1e-10), sm.solve(b, tol=1e-10)
+    assert np.abs(ra.phi - rb.phi).max() < 1e-7 * np.abs(ra.phi).max()
+
+
+def test_precondicionador_invalido():
+    from wavesim.em import QuasiStaticSolver
+
+    p, _ = _disco_con_piel(n=20)
+    with pytest.raises(ValueError, match="precondicionador"):
+        QuasiStaticSolver(p, 50e3, preconditioner="ilu")
