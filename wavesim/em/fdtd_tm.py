@@ -67,7 +67,30 @@ class YeeTMGrid:
     ``cb`` de la actualización de Ey (es decir, el material).
     """
 
-    def _setup_yee(self, phantom: Phantom, npml: int, cfl: float, dtype, f_ref: float) -> None:
+    @staticmethod
+    def _resolve_backend(backend: str, dtype) -> str:
+        """``"auto"`` usa Numba si está instalado y el dtype es float64; ``"numba"`` lo exige."""
+        if backend not in ("auto", "numpy", "numba"):
+            raise ValueError(f"backend desconocido '{backend}' (use 'auto', 'numpy' o 'numba')")
+        if backend == "numpy":
+            return "numpy"
+        try:
+            import numba  # noqa: F401
+        except ImportError:
+            if backend == "numba":
+                raise ImportError("El backend 'numba' requiere Numba: instálalo con `pip install wavesim[fast]` "
+                                  "o usa backend='numpy'.") from None
+            return "numpy"
+        if np.dtype(dtype) != np.float64:
+            # Los kernels están escritos y probados sólo para float64
+            if backend == "numba":
+                raise ValueError("El backend 'numba' sólo admite dtype=np.float64")
+            return "numpy"
+        return "numba"
+
+    def _setup_yee(self, phantom: Phantom, npml: int, cfl: float, dtype, f_ref: float,
+                   backend: str = "auto") -> None:
+        self.backend = self._resolve_backend(backend, dtype)
         self.phantom, self.grid = phantom, phantom.grid
         g = self.grid
         self.dt = cfl * g.dx / (C0 * np.sqrt(2.0))
@@ -88,6 +111,12 @@ class YeeTMGrid:
         self.inv_dx = 1.0 / g.dx
         self._src_j = self._src_i = None
         self._src_scale = None
+        if self.backend == "numba":
+            from . import _numba_fdtd as nk
+
+            self._nk = nk
+            # Los kernels actualizan los psi de la CPML in situ: comparten memoria con self.pml
+            self._pk = {name: nk.pack_pml(cp) for name, cp in self.pml.items()}
 
     def set_plane_wave_source(self, z: float | None = None, e0: float = 1.0) -> None:
         """Lámina de corriente horizontal que emite una onda plana de amplitud ``e0`` hacia abajo (y arriba)."""
@@ -119,6 +148,10 @@ class YeeTMGrid:
         self.pml[name].apply(out)
         return out
 
+    def _advance_h(self) -> None:
+        """Backend Numba: avanza Hx y Hz medio paso (el rotacional lo calcula el kernel de Ey)."""
+        self._nk.step_h(self.ey, self.hx, self.hz, self.inv_dx, self.ch, self._pk["ey_z"], self._pk["ey_x"])
+
     def _curl_h(self) -> np.ndarray:
         """Avanza H medio paso y devuelve ``dHx/dz - dHz/dx`` en los nodos de Ey."""
         self.hx += self.ch * self._deriv("ey_z", self.ey, 0, True)
@@ -129,6 +162,9 @@ class YeeTMGrid:
 class MaxwellTMSolver(YeeTMGrid):
     """FDTD de banda estrecha: ``eps'`` y ``sigma`` de cada celda a la frecuencia ``f0``.
 
+    ``backend``: ``"auto"`` (Numba si está instalado), ``"numpy"`` o ``"numba"``. Con float64 dan el
+    mismo campo salvo redondeo; el de Numba fusiona el paso en dos barridos paralelos por filas.
+
     ``eps_map`` (opcional) sustituye la permitividad relativa compleja
     ``eps' - j eps''`` por celda que se calcularía del fantoma (por ejemplo, la
     promediada en las interfaces de ``em.subpixel``); el fantoma sigue dando
@@ -136,7 +172,7 @@ class MaxwellTMSolver(YeeTMGrid):
     """
 
     def __init__(self, phantom: Phantom, f0: float, npml: int = 20, cfl: float = 0.95, dtype=np.float64,
-                 eps_map: np.ndarray | None = None):
+                 eps_map: np.ndarray | None = None, backend: str = "auto"):
         self.f0 = f0
         g = phantom.grid
         # Permitividad compleja por celda: en las celdas porosas, Maxwell Garnett (materials.porous)
@@ -156,7 +192,7 @@ class MaxwellTMSolver(YeeTMGrid):
         if self.points_per_wavelength < 10:
             warnings.warn(f"Sólo {self.points_per_wavelength:.1f} puntos por longitud de onda en el tejido: "
                           "reduce dx.", stacklevel=2)
-        self._setup_yee(phantom, npml, cfl, dtype, f_ref=f0)
+        self._setup_yee(phantom, npml, cfl, dtype, f_ref=f0, backend=backend)
         dt = self.dt
         eps = self.eps_r * EPS0
         k = self.sigma * dt / (2 * eps)
@@ -192,13 +228,23 @@ class MaxwellTMSolver(YeeTMGrid):
         acc = np.zeros(g.shape, complex)
         n_acc = 0
         t0 = time.time()
+        numba = self.backend == "numba"
         for n in range(nt):
-            curl = self._curl_h()
-            self.ey *= self.ca
-            self.ey += self.cb * curl
+            if numba:
+                self._advance_h()
+                self._nk.step_e(self.ey, self.hx, self.hz, self.ca, self.cb, self.inv_dx,
+                                self._pk["hx_z"], self._pk["hz_x"])
+            else:
+                curl = self._curl_h()
+                self.ey *= self.ca
+                self.ey += self.cb * curl
             self.ey[self._src_j, self._src_i] -= self._src_scale * drive[n]
             if n >= nt_settle and (n - nt_settle) % stride == 0:
-                acc += self.ey * np.exp(-2j * np.pi * self.f0 * t[n])
+                ph = np.exp(-2j * np.pi * self.f0 * t[n])
+                if numba:
+                    self._nk.accumulate_dft(acc, self.ey, ph.real, ph.imag)
+                else:
+                    acc += self.ey * ph
                 n_acc += 1
             if progress and n % max(nt // 10, 1) == 0:
                 print(f"  paso {n}/{nt}", flush=True)
