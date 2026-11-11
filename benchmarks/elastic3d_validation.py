@@ -568,7 +568,7 @@ def fracture_effect(t_fas, a_fas, ok, tf, pf, d, f0):
     return loss, delay
 
 
-def part_aplicacion(freqs=((0.5e6, 0.3e-3), (1e6, 0.2e-3)), bw=1.0, x_frac=8e-3, gap=1e-3, save=None):
+def part_aplicacion(freqs=((0.5e6, 0.3e-3),), bw=1.0, x_frac=8e-3, gap=1e-3, save=None):
     print("## Transmisión axial: tibia tubular (3D) frente a su corte longitudinal (2D)\n")
     print(f"Emisor en x = -17 mm, receptores a d = 8-35 mm, fractura transversal de {gap * 1e3:.0f} mm en "
           f"x = {x_frac * 1e3:.0f} mm (d = {(x_frac + 17e-3) * 1e3:.0f} mm), pulso gaussiano de ancho de banda "
