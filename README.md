@@ -321,11 +321,22 @@ wavesim con los simuladores de referencia de cada modalidad: k-Wave, SimSonic,
 Field II, openEMS, Meep, gprMax, MCX, GATE, ASTRA, KomaMRI, JEMRIS, EIDORS y
 los fantomas XCAT/Virtual Population. Explica qué hace mejor cada uno, cuándo
 usar otro en lugar de wavesim y cómo validarlo contra ellos, con una tabla de
-brechas cerradas y abiertas. Incluye una primera comparación numérica con
-k-Wave en dos capas fluidas (reflexión y transmisión coinciden entre ambos
-códigos a ±0.3 %), anterior a las mejoras posteriores. El script es
-`benchmarks/kwave_comparison.py` y requiere `pip install k-wave-python scipy`,
-que no son dependencias del proyecto.
+brechas cerradas y abiertas.
+
+**Comparación cruzada directa** (cada herramienta ejecutada aquí en CPU, en un
+entorno aparte; no son dependencias del proyecto; detalle en
+`docs/validacion/cruzada_*.md`):
+
+| Modalidad | Referencia | Acuerdo medido |
+|---|---|---|
+| Ultrasonido | k-Wave, Devito | R y T ≤ 0.28 %; atenuación ±1.1 %; \|R\| agua-hueso a 45° a 0.1-0.7 % de la analítica |
+| Maxwell | gprMax | losa 0.013 dB; pierna: campo 0.04-0.6 %, SAR 0.13-1.2 % |
+| Luz | MCML, MCX | totales ≤ 0.15 %; perfiles ≤ 2.5 % |
+| Rayos X | ASTRA, SpekPy, XCIST | proyector ≤ 0.4 %; HVL 2.8 % de media; scatter sin acuerdo con XCIST |
+| EIT | pyEIT | cambio de tensiones 0.5 %; posición 0-0.9 mm |
+
+Los tests `tests/test_cross_*.py` comparan wavesim con resultados guardados de
+esas herramientas, sin necesidad de instalarlas.
 
 ## Precisión de los datos y limitaciones
 
@@ -382,14 +393,20 @@ que no son dependencias del proyecto.
 - **Rendimiento**: una ecografía de 3 MHz y 24×22 mm con 3 ángulos tarda ~20 s
   con Numba y 4 hilos (2 mecanismos); con NumPy ~1 min. A 7-10 MHz la malla crece
   mucho (varios minutos o más). Sin GPU.
-- **Sin comparación cruzada**: salvo k-Wave (caso antiguo) y SpekPy, no se ha
-  ejecutado ningún otro simulador (SimSonic, Field II, gprMax, Meep, MCX, GATE,
-  KomaMRI, EIDORS...), y no hay validación revisada por pares.
+- **Comparación cruzada parcial**: hecha con k-Wave, Devito, gprMax, MCML, MCX,
+  ASTRA, SpekPy, XCIST y pyEIT (ver abajo); falta en RM (KomaMRI, JEMRIS), en el
+  solver 3D y frente a SimSonic o Field II. Ha dejado a la vista tres puntos
+  débiles: la forma de onda del ultrasonido difiere 6-8 % de k-Wave con la CFL
+  0.9 por defecto (0.3-0.9 % con CFL 0.3), la HVL del espectro de rayos X se
+  aparta +6-7 % a 140-150 kVp, y el scatter no concuerda con XCIST (que no es una
+  referencia física). No hay validación revisada por pares.
 
 ## Próximos pasos posibles
 
-- Comparar numéricamente con otros simuladores (el plan está en la comparativa,
-  §11): k-Wave elástico/SimSonic, gprMax o Meep, MCX, EIDORS, KomaMRI.
+- Completar la comparación cruzada: KomaMRI o JEMRIS para la RM, GATE o MC-GPU
+  para el scatter, SimSonic o k-Wave elástico para el hueso.
+- Reducir la dispersión temporal del ultrasonido (CFL menor por defecto o
+  corrección de la dispersión) y recalibrar el espectro de rayos X a kVp altos.
 - GPU (CuPy, JAX o Numba-CUDA) para el 3D y los B-mode a frecuencias altas.
 - M-PML en el solver 3D y un p dependiente del material en el 2D.
 - Corrección de scatter en la reconstrucción, *short scan* y haz cónico.

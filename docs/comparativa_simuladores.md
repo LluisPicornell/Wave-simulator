@@ -13,10 +13,10 @@ Maxwell dispersivo, Monte Carlo óptico, scatter de rayos X, Bloch espacial,
 EIT con CEM y Gauss-Newton, ultrasonido 3D de dominio pequeño). **No** se han
 cerrado las de escala y de validación externa: wavesim sigue sin GPU, sin 3D de
 cuerpo entero, sin no linealidad acústica, sin física completa de partículas,
-sin validación revisada por pares y, salvo k-Wave en un caso antiguo y SpekPy
-en espectros de rayos X, **sin haber ejecutado ningún otro simulador** para
-compararlo directamente. Todas las verificaciones nuevas son frente a
-soluciones analíticas o a referencias internas.
+y sin validación revisada por pares. La **comparación cruzada directa** sí se
+ha hecho ya en cinco modalidades, ejecutando aquí en CPU k-Wave, Devito,
+gprMax, MCML, MCX, ASTRA, SpekPy, XCIST y pyEIT (resumen en §10.0); la RM
+(KomaMRI, JEMRIS) y el modelo completo de electrodo de EIT siguen sin ella.
 
 ## Resumen: brecha → estado → evidencia
 
@@ -38,7 +38,7 @@ soluciones analíticas o a referencias internas.
 | 3D de cuerpo entero, fantomas segmentados | **Abierta** | Anatomía paramétrica 2D (+ tibia tubular 3D). |
 | No linealidad acústica, terapia | **Abierta** | Acústica lineal. |
 | Física completa de partículas (GATE, MC-GPU) | **Abierta** | Scatter MC sin electrones ni fluorescencia. |
-| Comparación cruzada directa | **Abierta** (sólo k-Wave en el caso antiguo y SpekPy en espectros) | §10. |
+| Comparación cruzada directa | **Hecha en 5 modalidades** (k-Wave, Devito, gprMax, MCML, MCX, ASTRA, SpekPy, XCIST, pyEIT); abierta en RM, CEM de EIT, FBP de abanico y Field II/SimSonic | §10.0 y `validacion/cruzada_*.md`. |
 | Validación externa revisada por pares | **Abierta** | Toda la validación es interna. |
 
 ## 0. Cómo leer este documento (y qué no se pudo verificar)
@@ -453,14 +453,39 @@ una revisión sistemática.
 Script: `benchmarks/kwave_comparison.py` (cabecera con instrucciones de
 instalación; `k-wave-python` **no** está en `pyproject.toml`).
 
-> **Estado de esta sección.** Las medidas de k-Wave y las de wavesim de §10.2
-> y §10.3 se hicieron con una versión anterior de wavesim y **no se han
-> repetido**: k-wave-python no estaba instalado al actualizar el documento, así
-> que no hay una comparación directa nueva. Lo que sí se ha rehecho es la parte
-> de wavesim del caso B, con la atenuación por mecanismo (ver §10.3). Los
-> números de wavesim de §10.2 podrían haber cambiado con la corrección de la
-> interfaz fluido-sólido (que actúa sobre todo a incidencia oblicua, no a la
-> normal de este caso).
+> **Estado de esta sección.** §10.0 resume la comparación cruzada actual
+> (noviembre de 2026). §10.1-10.4 son la primera comparación con k-Wave, hecha
+> con una versión anterior de wavesim; se conservan como histórico y sus casos A
+> y B están repetidos con el wavesim actual en
+> [cruzada_ultrasonido](validacion/cruzada_ultrasonido.md).
+
+### 10.0 Comparación cruzada con simuladores de referencia
+
+Cada herramienta se instaló en un entorno aparte (no es dependencia del
+proyecto) y se ejecutó en CPU con los mismos casos que wavesim. Los resultados
+de referencia están guardados en `benchmarks/data/cross_*/` y los tests
+`tests/test_cross_*.py` comparan wavesim con ellos sin la herramienta instalada.
+
+| Modalidad | Referencia | Resultado medido | Detalle |
+|---|---|---|---|
+| Ultrasonido, fluido | k-Wave (k-wave-python 0.6.2) | R y T de dos capas a ≤ 0.28 % entre códigos; α a ±1.1 % y c(f) a ≤ 0.22 % (el −7.7 % de §10.3 era la convención de `sound_speed` de k-Wave). Tejido heterogéneo: forma de onda a 0.3-0.9 % con CFL 0.3, pero **6-8 % con la CFL 0.9 por defecto** (dispersión temporal de wavesim; no cumple el 3 %) | [cruzada_ultrasonido](validacion/cruzada_ultrasonido.md) |
+| Ultrasonido, elástico | Devito 4.8.23 (mismo esquema, orden 4) | Devito coincide a ≤ 0.01 % con wavesim *sin* la corrección de interfaz; con ella, \|R\| a 45° queda a 0.11-0.69 % de la analítica frente a 1.4-3.2 % de Devito. Lamb S0/A0 ≤ 0.47 %. k-wave-python no tiene solver elástico | ídem |
+| Maxwell | gprMax 4.0.1 (mismos polos de Debye) | Losa 0.5-6 GHz: 0.013 dB y 0.00°. Pierna a 0.5 mm, banda ancha: \|E\| 0.04 % y SAR 0.13 % de mediana; banda estrecha: 0.62 % y 1.24 %; pico de SAR en la misma celda (cociente 0.993-1.011). La banda estrecha se separa ~0.5 % sin causa identificada. Meep no instaló | [cruzada_maxwell](validacion/cruzada_maxwell.md) |
+| Óptica | MCML 1.2 y MCX (pmcxcl 0.8.1, CPU) | R, A y T totales a ≤ 0.0008 de MCML (≤ 0.15 % de R); perfiles R(x), T(x) y fluencia a ≤ 2.5 % (MCX frente a MCML: ≤ 4.8 %). La difusión se aparta hasta −25 % bajo la fuente. Un solo escenario (800 nm, g = 0.9) | [cruzada_optica](validacion/cruzada_optica.md) |
+| Rayos X, geometría | ASTRA 2.5.0 (CPU) | Proyector a 0.09-0.40 %; FBP paralela y SIRT a 1-4 % del error frente al objeto. Sin referencia para el abanico curvo ni su FBP (ASTRA sólo en GPU; TIGRE exige CUDA) | [cruzada_rayos_x](validacion/cruzada_rayos_x.md) |
+| Rayos X, espectro | SpekPy 2.5.4, 23 casos fuera del ajuste | HVL: error medio 2.8 %, máx. 7.4 % (**+6-7 % a 140-150 kVp, −6 % a 50-60 kVp**); energía media ≤ 2.5 % | ídem |
+| Rayos X, scatter | XCIST 1.6.9 | **No concuerdan**: SPR wavesim/XCIST = 1.3 (10 cm), 3.0 (20 cm), 8.3 (35 cm). XCIST usa un núcleo de convolución calibrado, no un Monte Carlo: no decide cuál acierta | ídem |
+| EIT | pyEIT 1.2.4 (FEM) | dV con inclusión a 0.5 % (dx = 0.25 mm); tensiones absolutas de wavesim a 1.3 % de la analítica puntual (electrodo de tamaño finito); posición reconstruida 0-0.9 mm en ambos. pyEIT no tiene CEM | [cruzada_eit](validacion/cruzada_eit.md) |
+
+Lectura: donde hay una referencia independiente del mismo tipo (k-Wave, gprMax,
+MCML/MCX, ASTRA, pyEIT), wavesim coincide con ella al nivel del error de malla
+o estadístico. Los puntos débiles que la comparación deja a la vista son la
+dispersión temporal del ultrasonido con la CFL por defecto, el espectro de
+rayos X fuera de 70-120 kVp y el scatter, que sigue sin una referencia física
+independiente (haría falta GATE o MC-GPU). La comparación con pyEIT destapó un
+fallo (reconstrucción de un paso singular con una celda aislada), ya corregido.
+**Sin comparación cruzada todavía:** RM (KomaMRI, JEMRIS), ultrasonido frente a
+SimSonic, Field II o k-Wave elástico de MATLAB, solver 3D, CEM de EIT.
 
 ### 10.1 Entorno y método
 
