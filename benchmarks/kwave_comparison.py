@@ -16,7 +16,7 @@ Uso (desde la raíz del repositorio; para guardar las trazas de referencia, ``cr
 Casos (resultados en ``docs/validacion/cruzada_ultrasonido.md``):
 
 A) ``layers``: onda plana en dos capas fluidas sin pérdidas (c1=1500, rho1=1000 | c2=1800, rho2=1100).
-   R y T (cociente de envolventes y R(f) espectral), tiempos de llegada y forma de onda frente a la
+   R y T (cociente de envolventes), tiempos de llegada y forma de onda frente a la
    solución analítica y entre códigos, a dx = 0.20, 0.15, 0.10 y 0.05 mm. wavesim se ejecuta con su CFL
    por defecto (0.9) y con 0.3 (la de k-Wave), para separar su dispersión temporal.
 B) ``point``: fuente puntual (línea en 2D) en un medio homogéneo con atenuación de ley de potencia
@@ -298,7 +298,7 @@ def layers_setup(dx):
 
 
 def layers_metrics(t, p, dx, j_int, j_src):
-    """R, T (envolventes), R(f) espectral y tiempos de un código en el caso A."""
+    """R, T (cociente de envolventes) y tiempos de llegada de un código en el caso A."""
     g = LAYERS
     zi = (j_int - 0.5) * dx  # la interfaz queda entre los centros de las celdas j_int-1 y j_int
     # instante intermedio entre la onda incidente y la reflejada en el receptor 1
@@ -306,11 +306,8 @@ def layers_metrics(t, p, dx, j_int, j_src):
     ti, ai = peak(t, p[0], hi=split)
     tr, ar = peak(t, p[0], lo=split)
     tt, at = peak(t, p[1])
-    f = np.array([0.7e6, 1.0e6, 1.3e6])
-    inc = spectrum(t, p[0] * gate(t, hi=split), f)[0]
-    ref = spectrum(t, p[0] * gate(t, lo=split), f)[0]
     return dict(t_inc=ti, a_inc=ai, t_ref=tr, a_ref=ar, t_tr=tt, a_tr=at, R=ar / ai, T=at / ai,
-                dt_ref=tr - ti, dt_tr=tt - ti, R_f=np.abs(ref / inc), f=f)
+                dt_ref=tr - ti, dt_tr=tt - ti)
 
 
 def case_layers(dx, backend, cfls=(0.9, 0.3)):
@@ -347,11 +344,11 @@ def print_layers(r):
                                 for k, v in r["res"].items()))
     print(f"analítico: R = {r['R_an']:.4f}, T = {r['T_an']:.4f}, "
           f"t(refl)-t(inc) = {r['exp_ref']*1e6:.3f} us, t(trans)-t(inc) = {r['exp_tr']*1e6:.3f} us")
-    print(f"{'':18s}{'R':>8s}{'T':>8s}{'err R':>8s}{'err T':>8s}{'R(0.7/1.0/1.3 MHz)':>24s}"
-          f"{'dt_ref us':>11s}{'dt_tr us':>10s}{'t_inc us':>10s}")
+    print(f"{'':18s}{'R':>8s}{'T':>8s}{'err R':>8s}{'err T':>8s}{'dt_ref us':>11s}{'dt_tr us':>10s}"
+          f"{'t_inc us':>10s}")
     for k, v in r["res"].items():
         print(f"{k:18s}{v['R']:8.4f}{v['T']:8.4f}{(v['R']/r['R_an']-1)*100:+7.2f}%{(v['T']/r['T_an']-1)*100:+7.2f}%"
-              f"   {' '.join(f'{x:.4f}' for x in v['R_f'])}  {v['dt_ref']*1e6:9.3f}{v['dt_tr']*1e6:10.3f}"
+              f"  {v['dt_ref']*1e6:9.3f}{v['dt_tr']*1e6:10.3f}"
               f"{v['t_inc']*1e6:10.3f}")
     k = r["res"]["k-Wave"]
     for name, sh in r["shape"].items():
