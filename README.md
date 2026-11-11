@@ -161,8 +161,6 @@ fractura con su edema y hematoma cambia el campo una mediana de 1.5 dB a
 
 ### Fracturas internas: ¿las ven las frecuencias bajas?
 
-> Las cifras y la figura de esta sección corresponden al modelo anterior de 1 mecanismo de atenuación (no se regeneró el ejemplo 11 con el valor por defecto actual de 2 mecanismos).
-
 ![Detección de fracturas internas](docs/img/11_resumen.png)
 
 `11_fracturas_internas_baja_frecuencia.py` compara la ecografía (3 MHz) con
@@ -174,10 +172,15 @@ fractura la diferencia entre dos piernas sanas (D ≥ 6 dB = detectable).
 
 | Lesión | Ecografía 3 MHz | Baja frecuencia |
 |---|---|---|
-| Fractura desplazada 1 mm (control) | sí (D ≈ +13 dB) | sí en AT (+8 a +19 dB) |
-| Grieta intracortical o de la cortical lejana | no | no (D entre −3 y −21 dB) |
+| Fractura desplazada 1 mm (control) | sí (D ≈ +13 dB) | sí en AT (+9 a +14 dB) |
+| Grieta intracortical o de la cortical lejana | no | no (D entre −1 y −21 dB) |
 | Fractura por estrés con reacción endóstica | no | **sí en TT** (+7 a +9 dB): la señal llega ~0.45 µs antes |
-| Contusión ósea (edema trabecular) | no | dudoso en TT (+2 a +5 dB) |
+| Contusión ósea (edema trabecular) | no | dudoso en TT (+4 a +6 dB) |
+
+Cifras del cuerpo normal. En el cuerpo obeso, la AT a 0.25 MHz da D ≈ +8 dB para la
+fisura superficial y la grieta intracortical, pero sólo a esa frecuencia (a 0.5 y
+1 MHz, entre +0.4 y −8 dB) y con una sola pareja de piernas sanas de referencia:
+no basta para darlo por detección.
 
 Conclusión: ninguna técnica distingue la **grieta** interna en sí, porque
 mide 0.1-0.3 mm, mucho menos que la longitud de onda (6 mm a 0.25 MHz), y
