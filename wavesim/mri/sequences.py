@@ -11,14 +11,9 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from ..materials.mri import MRI
+from ..materials.mri import FAT_FRACTION, MRI
 
-#: Fracción de la señal que procede de protones de grasa (para la saturación grasa).
-#: Fascia y periostio: algo de grasa entre las láminas de colágeno (estimación).
-FAT_FRACTION: dict[str, float] = {
-    "fat": 0.95, "marrow": 0.85, "trabecular_bone": 0.6, "edema": 0.4, "skin": 0.1, "muscle": 0.03,
-    "fascia": 0.05, "periosteum": 0.02,
-}
+__all__ = ["FAT_FRACTION", "SEQUENCES", "Sequence", "resolve", "signal", "tissue_signal"]
 
 
 @dataclass(frozen=True)
