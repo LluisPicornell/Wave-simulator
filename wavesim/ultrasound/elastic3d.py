@@ -126,7 +126,7 @@ def isotropic_stiffness_3d(cp, cs) -> np.ndarray:
     return np.stack([p2, p2, p2 - 2.0 * s2, s2, s2])
 
 
-def elastic_medium_3d(phantom: Phantom3D, f0: float, n_mechanisms: int = 1, attenuation: bool = True,
+def elastic_medium_3d(phantom: Phantom3D, f0: float, n_mechanisms: int = 2, attenuation: bool = True,
                       anisotropic_bone: bool = False, dtype=np.float32) -> ElasticMedium3D:
     """Medio del solver 3D a partir de un ``Phantom3D`` (tablas de ``materials.acoustic``).
 
@@ -316,7 +316,7 @@ class ElasticSolver3D:
         phantom: Phantom3D,
         f0: float,
         npml: int | tuple[int, int, int] = 10,
-        n_mechanisms: int = 1,
+        n_mechanisms: int = 2,
         attenuation: bool = True,
         cfl: float = 0.9,
         medium: ElasticMedium3D | None = None,

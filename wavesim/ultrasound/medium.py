@@ -92,7 +92,7 @@ class ElasticMedium:
         return w
 
 
-def elastic_medium(phantom: Phantom, f0: float, n_mechanisms: int = 1, scattering: float = 1.0,
+def elastic_medium(phantom: Phantom, f0: float, n_mechanisms: int = 2, scattering: float = 1.0,
                    attenuation: bool = True, anisotropic_bone: bool = False) -> ElasticMedium:
     """Construye el medio para el solver elástico a la frecuencia central ``f0``.
 
