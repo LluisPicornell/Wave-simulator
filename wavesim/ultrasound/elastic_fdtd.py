@@ -19,6 +19,10 @@ y ``mu`` es C55; el caso isótropo conserva su propio camino, más barato.
   conversiones P↔S en las interfaces.
 - ``mu`` en los nodos ``sxz`` se promedia armónicamente: si algún vecino es
   fluido, la tensión de cizalla es nula (condición física en la interfaz).
+- Junto a una interfaz fluido-sólido, la deformación de cizalla del sólido no
+  lee la velocidad tangencial del fluido (que desliza) y el fluido no recibe
+  la cizalla del sólido (ver ``_slip_terms``): sin eso, R(θ) agua-hueso no
+  convergía al refinar la malla.
 - Atenuación viscoelástica GSLS (ver ``attenuation.py``) con memorias
   actualizadas por Crank-Nicolson.
 - Bordes absorbentes CPML en los cuatro lados.
@@ -219,6 +223,9 @@ class ElasticSolver:
             "exz_b": CPMLDerivative(shape, 1, True, **cp_kw),
         }
         self.npml = npml
+        # Fuera de la CPML (sus memorias psi no se tocan) y lejos de los bordes de los buffers
+        slip = _slip_terms(mu_u > 0, self.dt_mu_xz > 0, npml + 3) if self.has_shear else {}
+        self._slip = {k: (t, S, (W * self.inv_dx).astype(dtype)) for k, (t, S, W) in slip.items()}
         self.sources: list[Source] = []
         self.receivers: dict[str, Receiver] = {}
         self.cp_local = m.cp
@@ -322,7 +329,43 @@ class ElasticSolver:
         out = self.d[name]
         (self._dx if axis == 1 else self._dz)(f, out, forward)
         self.pml[name].apply(out)
+        if name in self._slip:
+            # junto a una interfaz fluido-sólido (ver ``_slip_terms``)
+            t, vals = self._slip_delta(name, f)
+            out.reshape(-1)[t] += vals
         return out
+
+    def _slip_delta(self, name, f):
+        """Corrección de la derivada ``name`` de ``f``: índices planos de destino (sin repetir) y valores."""
+        t, S, W = self._slip[name]
+        return t, np.sum(W * f.reshape(-1)[S], axis=1)
+
+    def _slip_correct_numba(self, stage: str) -> None:
+        """Lleva el resultado de un kernel Numba al del paso NumPy con los términos de ``_slip_terms``.
+
+        Los kernels usan el estencil de 4.º orden sin corregir. Las
+        actualizaciones son lineales en cada derivada y los campos que se
+        derivan no cambian dentro del kernel, así que basta sumar después el
+        efecto de la corrección en los pocos nodos de la interfaz (fuera de la CPML).
+        """
+        if stage == "velocity":
+            for name, field, coef in (("sxz_z", self.vx, self.dtbx), ("sxz_x", self.vz, self.dtbz)):
+                if name in self._slip:
+                    t, vals = self._slip_delta(name, self.sxz)
+                    field.reshape(-1)[t] += coef.reshape(-1)[t] * vals
+            return
+        sxz = self.sxz.reshape(-1)
+        for name, f in (("exz_a", self.vx), ("exz_b", self.vz)):
+            if name not in self._slip:
+                continue
+            t, vals = self._slip_delta(name, f)
+            sxz[t] += self.dt_mu_xz.reshape(-1)[t] * vals
+            if self.n_mech:
+                # misma corrección en las memorias (Crank-Nicolson, ver ``_memory``), con el peso de cada mecanismo
+                for m in range(self.n_mech):
+                    forcing = self.dt_mu_t_xz[m].reshape(-1)[t] * vals
+                    sxz[t] -= (0.5 * self.mem_b[m]) * forcing
+                    self.rxz[m].reshape(-1)[t] -= self.mem_b[m] * forcing
 
     def _apply_force_sources(self, n: int) -> None:
         for s in self.sources:
@@ -351,6 +394,8 @@ class ElasticSolver:
             self._nb_c1, self._nb_c2,
             pml["sxx_x"], pml["sxz_z"], pml["sxz_x"], pml["szz_z"],
         )  # fmt: skip
+        if self._slip:
+            self._slip_correct_numba("velocity")
         self._apply_force_sources(n)
         nk.stress_kernel(
             self.vx, self.vz, self.sxx, self.szz, self.sxz,
@@ -359,6 +404,8 @@ class ElasticSolver:
             self.has_shear, self._nb_c1, self._nb_c2,
             pml["exx"], pml["ezz"], pml["exz_a"], pml["exz_b"], *self._nb_aniso,
         )  # fmt: skip
+        if self._slip:
+            self._slip_correct_numba("stress")
         self._apply_pressure_sources(n)
 
     def step(self, n: int) -> None:
@@ -547,3 +594,75 @@ def _harmonic_xz(mu: np.ndarray) -> np.ndarray:
     with np.errstate(divide="ignore"):
         hm = 4.0 / np.sum(1.0 / stack, axis=0)
     return np.where(np.all(stack > 0, axis=0), hm, 0.0)
+
+
+def _slip_terms(solid: np.ndarray, shear: np.ndarray, margin: int) -> dict[str, tuple[np.ndarray, ...]]:
+    """Términos que corrigen las derivadas de cizalla junto a una interfaz fluido-sólido.
+
+    En la deformación de cizalla de un nodo ``sxz`` del sólido, el estencil de
+    4.º orden lee con peso C2 la velocidad tangencial de un nodo situado al otro
+    lado de la interfaz. El fluido no viscoso desliza, así que esa velocidad no
+    es la prolongación de la del sólido y el salto entra con peso C2/dx: un
+    error O(1) que no baja al refinar la malla (R(θ) agua-hueso quedaba ~1 %
+    alto a 45° tanto con 25 como con 35 puntos por longitud de onda, y 2.7 % a
+    50° con 25; ``docs/validacion/elastico.md``). Ese punto exterior
+    se sustituye por el nodo interior del mismo lado (extrapolación de orden
+    cero: el estencil sigue anulando las constantes).
+
+    Para que el esquema siga conservando la energía, y por tanto siendo
+    estable, el cambio traspuesto se aplica a la ecuación del movimiento: el
+    nodo de velocidad del fluido deja de recibir esa tensión de cizalla (que en
+    un fluido es nula) y la recibe el nodo interior del sólido. Pasar a 2.º
+    orden sólo las derivadas, sin esta simetría, rompía la conservación: un
+    fantoma con fractura sin atenuación crecía exponencialmente tras ~10⁴ pasos.
+
+    ``solid``: celdas con ``mu > 0``; ``shear``: nodos ``sxz`` con cizalla. Se
+    excluye la franja de ``margin`` celdas del borde (la CPML y los bordes de
+    los buffers de derivadas). Devuelve, para cada derivada (``exz_a`` = dvx/dz
+    y ``exz_b`` = dvz/dx en nodos ``sxz``; ``sxz_z`` y ``sxz_x`` en nodos de
+    velocidad), ``(t, S, W)`` en índices planos: ``deriv.flat[t] += sum(W * f.flat[S], axis=1) / dx``.
+    Cada destino ``t`` aparece una vez y sus términos ocupan una fila de ``S`` y
+    ``W`` (relleno con peso 0): así la corrección es una suma densa y rápida.
+    """
+    nz, nx = solid.shape
+    fluid = ~solid
+    j, i = np.nonzero(shear)
+    keep = (j >= margin) & (j < nz - margin) & (i >= margin) & (i < nx - margin)
+    j, i = j[keep], i[keep]
+    terms = {k: [] for k in ("exz_a", "exz_b", "sxz_z", "sxz_x")}
+
+    def add(strain, momentum, sel, out_off, in_off):
+        """Sustituye el punto exterior ``out_off`` por el interior ``in_off`` (desplazamientos (dj, di) del nodo)."""
+        jj, ii = j[sel], i[sel]
+        (oj, oi), (nj, ni) = out_off, in_off
+        # deformación en el nodo sxz: -C2 f[exterior] -> -C2 f[interior] (o +C2, según el lado)
+        sign = 1.0 if oj + oi < 0 else -1.0
+        w = np.full(jj.size, sign * C2)
+        terms[strain] += [(jj, ii, jj + oj, ii + oi, w), (jj, ii, jj + nj, ii + ni, -w)]
+        # su traspuesta en la ecuación del movimiento (D_b = -D_f^T)
+        terms[momentum] += [(jj + oj, ii + oi, jj, ii, -w), (jj + nj, ii + ni, jj, ii, w)]
+
+    def cell(dj, di):
+        return fluid[np.clip(j + dj, 0, nz - 1), np.clip(i + di, 0, nx - 1)]
+
+    # vx[j-1] y vx[j+2] están entre las celdas (fila, i) y (fila, i+1); vz[i-1] y vz[i+2], entre (j, col) y (j+1, col)
+    add("exz_a", "sxz_z", cell(-1, 0) | cell(-1, 1), (-1, 0), (0, 0))
+    add("exz_a", "sxz_z", cell(2, 0) | cell(2, 1), (2, 0), (1, 0))
+    add("exz_b", "sxz_x", cell(0, -1) | cell(1, -1), (0, -1), (0, 0))
+    add("exz_b", "sxz_x", cell(0, 2) | cell(1, 2), (0, 2), (0, 1))
+    out = {}
+    for name, parts in terms.items():
+        tj, ti, sj, si, w = (np.concatenate(c) for c in zip(*parts))
+        if not tj.size:
+            continue
+        t, inv = np.unique(tj * nx + ti, return_inverse=True)
+        order = np.argsort(inv, kind="stable")
+        counts = np.bincount(inv, minlength=t.size)
+        col = np.arange(inv.size) - np.repeat(np.cumsum(counts) - counts, counts)
+        S = np.zeros((t.size, counts.max()), np.int64)
+        W = np.zeros((t.size, counts.max()))
+        S[inv[order], col] = (sj * nx + si)[order]
+        W[inv[order], col] = w[order]
+        out[name] = (t, S, W)
+    return out
+
