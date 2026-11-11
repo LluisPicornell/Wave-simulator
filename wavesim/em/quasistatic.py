@@ -30,6 +30,13 @@ Por reciprocidad (Geselowitz) la sensibilidad de una medida a la admitividad
 de una región es el producto de los gradientes del campo de inyección y del
 campo de la medida; esa es la matriz que se usa para reconstruir imágenes de
 diferencias (p. ej. sano frente a fracturado) en un solo paso linealizado.
+
+Modelo completo de electrodo (CEM, Cheng et al. 1989; Somersalo et al. 1992),
+opcional con ``simulate_eit(..., contact_impedance=z_c)``: cada electrodo es
+una condición de contorno tipo Robin ``sigma* dphi/dn = (U_l - phi) / z_c``
+con su tensión ``U_l`` como incógnita y su corriente total impuesta. La
+derivación y la conversión de unidades están en ``docs/validacion/eit.md``;
+la reconstrucción iterativa (Gauss-Newton) está en ``wavesim.em.eit``.
 """
 
 from __future__ import annotations
@@ -71,9 +78,15 @@ class QuasiStaticSolver:
 
     ``admittivity_map`` permite sustituir el mapa complejo de admitividades (por
     ejemplo para perturbarlo y comprobar la matriz de sensibilidad).
+
+    ``shunt`` (S/m, forma ``(nz, nx)``) es una conductancia extra a tierra por
+    celda: la usa el modelo completo de electrodo para el contacto (término de
+    Robin ``g (phi - U)``, con ``U`` en el lado derecho). Con ella el operador
+    deja de ser singular y ``solve`` no necesita referencia de media nula.
     """
 
-    def __init__(self, phantom: Phantom, f: float, admittivity_map: np.ndarray | None = None):
+    def __init__(self, phantom: Phantom, f: float, admittivity_map: np.ndarray | None = None,
+                 shunt: np.ndarray | None = None):
         self.phantom = phantom
         self.grid = phantom.grid
         self.f = float(f)
@@ -94,6 +107,9 @@ class QuasiStaticSolver:
         diag[:, 1:] += self.face_x
         diag[:-1, :] += self.face_z
         diag[1:, :] += self.face_z
+        self._shunt = None if shunt is None else np.where(tis, shunt, 0.0).astype(complex)
+        if self._shunt is not None:
+            diag += self._shunt
         # Celdas aisladas (sin caras) no aportan ecuación: diagonal 1 para no dividir por cero
         self._diag = np.where(diag != 0, diag, 1.0)
 
@@ -112,6 +128,8 @@ class QuasiStaticSolver:
         flz = self.face_z * (phi[1:, :] - phi[:-1, :])
         out[:-1, :] -= flz
         out[1:, :] += flz
+        if self._shunt is not None:
+            out += self._shunt * phi
         return out
 
     def solve(self, source: np.ndarray | None = None, fixed: np.ndarray | None = None,
@@ -126,10 +144,11 @@ class QuasiStaticSolver:
         shape = self.grid.shape
         b = np.zeros(shape, dtype=complex) if source is None else np.asarray(source, dtype=complex)
         b = np.where(self.tissue, b, 0.0)
+        neumann = fixed is None and self._shunt is None
         if fixed is None:
             free = self.tissue
             phi0 = np.zeros(shape, dtype=complex)
-            if abs(b.sum()) > 1e-9 * max(np.abs(b).sum(), 1e-300):
+            if neumann and abs(b.sum()) > 1e-9 * max(np.abs(b).sum(), 1e-300):
                 raise ValueError("Con Neumann puro la corriente total inyectada debe ser nula.")
         else:
             fixed = np.asarray(fixed, dtype=bool) & self.tissue
@@ -159,7 +178,7 @@ class QuasiStaticSolver:
                 p = z + (rz_new / rz) * p
                 rz = rz_new
         phi = x + phi0
-        if fixed is None:
+        if neumann:
             phi = np.where(self.tissue, phi - phi[self.tissue].mean(), 0.0)
         return PotentialResult(phi, it, float(res))
 
@@ -209,6 +228,7 @@ class Electrodes:
 
     cells: list[np.ndarray]
     centers: np.ndarray
+    widths: np.ndarray | None = None  # ancho nominal (m) de cada electrodo; lo necesita el CEM
 
     def __len__(self) -> int:
         return len(self.cells)
@@ -219,13 +239,14 @@ class Electrodes:
         return m.reshape(shape)
 
 
-def _make_electrodes(phantom: Phantom, groups: list[np.ndarray]) -> Electrodes:
+def _make_electrodes(phantom: Phantom, groups: list[np.ndarray], width: float | None = None) -> Electrodes:
     g = phantom.grid
     centers = []
     for flat in groups:
         j, i = np.unravel_index(flat, g.shape)
         centers.append((g.x0 + i.mean() * g.dx, g.z0 + j.mean() * g.dx))
-    return Electrodes(groups, np.array(centers))
+    widths = None if width is None else np.full(len(groups), float(width))
+    return Electrodes(groups, np.array(centers), widths)
 
 
 def ring_electrodes(phantom: Phantom, n: int, width: float, start_deg: float = 0.0) -> Electrodes:
@@ -253,7 +274,7 @@ def ring_electrodes(phantom: Phantom, n: int, width: float, start_deg: float = 0
         d = np.abs((theta - t0 + np.pi) % (2.0 * np.pi) - np.pi)
         sel = d <= half
         groups.append(flat[sel] if sel.any() else flat[[np.argmin(d)]])
-    return _make_electrodes(phantom, groups)
+    return _make_electrodes(phantom, groups, width)
 
 
 def surface_electrodes(phantom: Phantom, n: int, width: float, margin: float | None = None) -> Electrodes:
@@ -276,7 +297,7 @@ def surface_electrodes(phantom: Phantom, n: int, width: float, margin: float | N
         if sel.size == 0:
             sel = cols[[np.argmin(np.abs(g.x[cols] - xc))]]
         groups.append(first[sel] * g.nx + sel)
-    return _make_electrodes(phantom, groups)
+    return _make_electrodes(phantom, groups, width)
 
 
 # --------------------------------------------------------------------------
@@ -302,6 +323,57 @@ def adjacent_protocol(n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 @dataclass
+class ContactModel:
+    """Contacto del modelo completo de electrodo (CEM) discretizado sobre las celdas de los electrodos.
+
+    ``g`` es la conductancia de contacto de cada celda (S por metro de
+    profundidad), ``dg`` su derivada respecto al cambio relativo de la
+    admitividad de esa celda (entra en el jacobiano) y ``elec`` el electrodo al
+    que pertenece (-1 fuera de los electrodos).
+    """
+
+    z_c: np.ndarray  # (n,) impedancia de contacto de cada electrodo (ohm·m²)
+    g: np.ndarray  # (nz, nx)
+    dg: np.ndarray  # (nz, nx)
+    elec: np.ndarray  # (nz, nx) int
+
+
+def build_contact(solver: QuasiStaticSolver, electrodes: Electrodes, z_c: float | complex | np.ndarray) -> ContactModel:
+    """Conductancias de contacto del CEM.
+
+    Unidades: la impedancia de contacto ``z_c`` se da en ohm·m² (resistencia
+    por área de piel, la unidad en que se tabula para electrodos reales). En el
+    corte 2D se calcula por metro de profundidad: un tramo de electrodo de
+    longitud ``l`` tiene área ``l · 1 m`` y conductancia ``l / z_c`` (S/m de
+    profundidad), la misma unidad que las admitividades de cara ``sigma*``.
+
+    El ancho nominal ``w_l`` del electrodo (no la longitud en escalera de sus
+    celdas, que depende de la malla) se reparte a partes iguales entre sus
+    celdas. A ``z_c`` se suma el camino del centro de la celda a la superficie,
+    ``(dx/2)/sigma*``: así ``z_c -> 0`` da un electrodo ideal en la superficie y
+    no un electrodo medio celda dentro del tejido (error de primer orden).
+    """
+    n = len(electrodes)
+    z = np.broadcast_to(np.asarray(z_c, dtype=complex), (n,)).copy()
+    shape = solver.grid.shape
+    h = 0.5 * solver.grid.dx
+    g = np.zeros(shape, dtype=complex)
+    dg = np.zeros(shape, dtype=complex)
+    elec = np.full(shape, -1, dtype=int)
+    for k, cells in enumerate(electrodes.cells):
+        width = electrodes.widths[k] if electrodes.widths is not None else cells.size * solver.grid.dx
+        length = width / cells.size
+        j, i = np.unravel_index(cells, shape)
+        y = solver.y[j, i]
+        gc = length / (z[k] + h / y)
+        g[j, i] = gc
+        # g = l/(z + h/y); y dg/dy = g² (h/y) / l
+        dg[j, i] = gc**2 * (h / y) / length
+        elec[j, i] = k
+    return ContactModel(z, g, dg, elec)
+
+
+@dataclass
 class EITResult:
     solver: QuasiStaticSolver
     electrodes: Electrodes
@@ -313,16 +385,66 @@ class EITResult:
     voltages: np.ndarray  # (n_datos,) tensiones diferenciales complejas (V)
     iterations: int  # máximo de iteraciones de COCG entre tramas
     residual: float  # peor residuo relativo entre tramas
+    contact: ContactModel | None = None  # None = electrodo ideal; si no, CEM (electrode_potentials = U_l)
+
+
+def _simulate_cem(solver: QuasiStaticSolver, electrodes: Electrodes, current: float, z_c, tol: float) -> EITResult:
+    """CEM por complemento de Schur sobre las tensiones de electrodo.
+
+    Con ``U`` fijas, ``(A + G) phi = G U`` es un problema de Dirichlet-Robin
+    bien planteado. Se resuelve un campo ``psi_l`` por electrodo (``U_l = 1``,
+    el resto 0) y la matriz de transferencia ``S[k, l]`` = corriente que entra
+    por ``k`` con ``U = e_l`` (simétrica, filas de suma nula, es la matriz de
+    "tensión a corriente" del CEM). Para cualquier patrón de corrientes ``I``,
+    ``S U = I`` (con ``sum U = 0``) da las tensiones y el campo es ``sum U_l psi_l``.
+    Cuesta lo mismo que el modo ideal (un COCG por electrodo) y sirve para
+    cualquier protocolo.
+    """
+    n = len(electrodes)
+    shape = solver.grid.shape
+    contact = build_contact(solver, electrodes, z_c)
+    cem = QuasiStaticSolver(solver.phantom, solver.f, admittivity_map=solver.y, shunt=contact.g)
+    psi = np.zeros((n,) + shape, dtype=complex)
+    smat = np.zeros((n, n), dtype=complex)
+    its, worst = 0, 0.0
+    for lidx in range(n):
+        r = cem.solve(np.where(contact.elec == lidx, contact.g, 0.0), tol=tol)
+        psi[lidx] = r.phi
+        its, worst = max(its, r.iterations), max(worst, r.residual)
+        for k in range(n):
+            m = contact.elec == k
+            smat[k, lidx] = (contact.g[m].sum() if k == lidx else 0.0) - (contact.g[m] * r.phi[m]).sum()
+    # Referencia de tensión: sum U = 0 (se añade el vector 1 a S, que es singular con núcleo 1)
+    sreg = smat + np.abs(np.diag(smat)).mean() / n * np.ones((n, n))
+    pattern = np.zeros((n, n), dtype=complex)
+    pattern[np.arange(n), np.arange(n)] = current
+    pattern[np.arange(n), (np.arange(n) + 1) % n] = -current
+    pots = np.linalg.solve(sreg, pattern.T).T
+    fields = np.einsum("pl,lzx->pzx", pots, psi)
+    frames, meas = adjacent_protocol(n)
+    volts = pots[frames, meas[:, 0]] - pots[frames, meas[:, 1]]
+    return EITResult(solver, electrodes, current, fields, pots, frames, meas, volts, its, worst, contact)
 
 
 def simulate_eit(solver: QuasiStaticSolver, electrodes: Electrodes, current: float = 1.0,
-                 tol: float = 1e-10) -> EITResult:
+                 tol: float = 1e-10, contact_impedance: float | complex | np.ndarray | None = None) -> EITResult:
     """Problema directo: tensiones diferenciales del patrón adyacente.
 
-    ``current`` es la amplitud inyectada (A por metro de profundidad). Cada
-    electrodo reparte su corriente por igual entre sus celdas y su potencial
-    es el medio de ellas (electrodo ideal, sin impedancia de contacto).
+    ``current`` es la amplitud inyectada (A por metro de profundidad). Por
+    defecto (``contact_impedance=None``) cada electrodo reparte su corriente
+    por igual entre sus celdas y su potencial es el medio de ellas (electrodo
+    ideal, sin impedancia de contacto, sin derivación).
+
+    Con ``contact_impedance`` (ohm·m², escalar o uno por electrodo, puede ser
+    complejo) se usa el modelo completo de electrodo: cada electrodo es
+    equipotencial en el metal, con una caída ``J z_c`` en el contacto, y la
+    corriente se reparte según la resistencia del contacto y del tejido
+    (derivación o *shunting*). Los electrodos necesitan ancho nominal
+    (``ring_electrodes`` y ``surface_electrodes`` lo guardan) y
+    ``electrode_potentials`` pasa a ser la tensión de metal ``U_l``.
     """
+    if contact_impedance is not None:
+        return _simulate_cem(solver, electrodes, current, contact_impedance, tol)
     n = len(electrodes)
     shape = solver.grid.shape
     fields = np.zeros((n,) + shape, dtype=complex)
@@ -412,6 +534,13 @@ def sensitivity_matrix(eit: EITResult, factor: int = 6) -> Sensitivity:
         cell[:, 1:] += wxb * px
         cell[:-1, :] += wza * pz
         cell[1:, :] += wzb * pz
+        if eit.contact is not None:
+            # El contacto también depende de la admitividad de la celda de piel: mismo producto de caídas
+            c = eit.contact
+            e = np.where(c.elec >= 0, c.elec, 0)
+            dp = np.where(c.elec >= 0, eit.fields[p] - eit.electrode_potentials[p][e], 0.0)
+            dq = np.where(c.elec >= 0, eit.fields[q] - eit.electrode_potentials[q][e], 0.0)
+            cell += c.dg * dp * dq / eit.current
         mat[m] = -_block_sum(cell, factor, coarse_shape)[active]
     return Sensitivity(mat, coarse_shape, factor, active)
 
