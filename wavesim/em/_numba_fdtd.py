@@ -45,12 +45,12 @@ def step_h(ey, hx, hz, inv_dx, ch, pz, px):
                 # Franja CPML en z: la fila entera lleva memoria psi
                 left = j < pz[0]
                 k = j if left else j - pz[1]
-                a = pz[2][k] if left else pz[4][k]
-                b = pz[3][k] if left else pz[5][k]
+                a_row = pz[2][k] if left else pz[4][k]
+                b_row = pz[3][k] if left else pz[5][k]
                 psi_row = pz[6][k] if left else pz[7][k]
                 for i in range(nx):
                     d = (ey[j + 1, i] - ey[j, i]) * inv_dx
-                    psi = b * psi_row[i] + a * d
+                    psi = b_row[i] * psi_row[i] + a_row[i] * d
                     psi_row[i] = psi
                     d += psi
                     hx[j, i] += ch * d
@@ -61,7 +61,7 @@ def step_h(ey, hx, hz, inv_dx, ch, pz, px):
         nl = min(px[0], nx - 1)
         for i in range(nl):
             d = (ey[j, i + 1] - ey[j, i]) * inv_dx
-            psi = px[3][i] * px[6][j, i] + px[2][i] * d
+            psi = px[3][j, i] * px[6][j, i] + px[2][j, i] * d
             px[6][j, i] = psi
             d += psi
             hz[j, i] -= ch * d
@@ -71,7 +71,7 @@ def step_h(ey, hx, hz, inv_dx, ch, pz, px):
         for i in range(r0, nx - 1):
             k = i - px[1]
             d = (ey[j, i + 1] - ey[j, i]) * inv_dx
-            psi = px[5][k] * px[7][j, k] + px[4][k] * d
+            psi = px[5][j, k] * px[7][j, k] + px[4][j, k] * d
             px[7][j, k] = psi
             d += psi
             hz[j, i] -= ch * d
@@ -85,12 +85,12 @@ def _curl_row(hx, hz, j, inv_dx, pz, px, c):
         if j < pz[0] or j >= pz[1]:
             left = j < pz[0]
             k = j if left else j - pz[1]
-            a = pz[2][k] if left else pz[4][k]
-            b = pz[3][k] if left else pz[5][k]
+            a_row = pz[2][k] if left else pz[4][k]
+            b_row = pz[3][k] if left else pz[5][k]
             psi_row = pz[6][k] if left else pz[7][k]
             for i in range(nx):
                 d = (hx[j, i] - hx[j - 1, i]) * inv_dx
-                psi = b * psi_row[i] + a * d
+                psi = b_row[i] * psi_row[i] + a_row[i] * d
                 psi_row[i] = psi
                 c[i] = d + psi
         else:
@@ -103,7 +103,7 @@ def _curl_row(hx, hz, j, inv_dx, pz, px, c):
     nl = min(px[0], nx)
     for i in range(1, nl):
         d = (hz[j, i] - hz[j, i - 1]) * inv_dx
-        psi = px[3][i] * px[6][j, i] + px[2][i] * d
+        psi = px[3][j, i] * px[6][j, i] + px[2][j, i] * d
         px[6][j, i] = psi
         c[i] -= d + psi
     r0 = max(px[1], nl, 1)
@@ -112,7 +112,7 @@ def _curl_row(hx, hz, j, inv_dx, pz, px, c):
     for i in range(r0, nx):
         k = i - px[1]
         d = (hz[j, i] - hz[j, i - 1]) * inv_dx
-        psi = px[5][k] * px[7][j, k] + px[4][k] * d
+        psi = px[5][j, k] * px[7][j, k] + px[4][j, k] * d
         px[7][j, k] = psi
         c[i] -= d + psi
 
