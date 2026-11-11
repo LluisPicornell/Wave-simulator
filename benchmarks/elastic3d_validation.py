@@ -10,7 +10,7 @@ Uso (desde la raíz del repositorio; numpy y, para que no tarde horas, numba):
     python benchmarks/elastic3d_validation.py --parte oblicua                    # R(45°) en los 3 planos (~4 min)
     python benchmarks/elastic3d_validation.py --parte estabilidad --pasos 30000  # tubo en la CPML (~20 min)
     python benchmarks/elastic3d_validation.py --parte rendimiento --hilos 1 4    # memoria y pasos/s (~3 min)
-    python benchmarks/elastic3d_validation.py --parte aplicacion                 # tubo frente a placa 2D (~25 min)
+    python benchmarks/elastic3d_validation.py --parte aplicacion                 # tubo frente a placa 2D, 0.5 MHz (~8 min)
 
 Partes:
 
