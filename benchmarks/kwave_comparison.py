@@ -71,12 +71,12 @@ def ws_medium(rho, cp, f0, alpha_db=None, y=1.1, n_mech=1) -> ElasticMedium:
         z = np.zeros_like(rho)
         return ElasticMedium(rho, cp, z, z.copy(), z.copy(), np.zeros(0), f0)
     tau_sigma = att.relaxation_times(f0, n_mech)
-    band = att.fit_band(f0)
+    band = att.fit_band(f0, n_mech)
     alpha = alpha_db * (band / 1e6) ** y * 100.0 / DB_PER_NP
     c0 = float(cp.flat[0])
-    tau = att.fit_tau(att.target_qinv(alpha, c0, band), tau_sigma, band)
-    return ElasticMedium(rho, cp, np.zeros_like(rho), np.full_like(rho, tau), np.zeros_like(rho),
-                         tau_sigma, f0)
+    w = att.mechanism_weights(alpha[None], np.array([c0]), band, tau_sigma, f0)[0]
+    return ElasticMedium(rho, cp, np.zeros_like(rho), w[:, None, None] * np.ones_like(rho),
+                         np.zeros((n_mech, *rho.shape)), tau_sigma, f0)
 
 
 def ws_run(rho, cp, dx, src_cells, rec_cells, t_end, alpha_db=None, n_mech=1):

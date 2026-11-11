@@ -31,18 +31,32 @@ F32 = np.float32
 def pack_pml(cp) -> tuple:
     """Empaqueta una ``CPMLDerivative`` en una tupla que Numba sabe recibir.
 
-    Los coeficientes se aplanan a 1D (a lo largo del eje de la derivada); los
+    Los coeficientes de las franjas propias se pasan como arrays 2D de la
+    forma de su ``psi`` (con M-PML dependen de las dos coordenadas en las
+    esquinas) y los de las franjas de la otra dirección, aplanados a 1D. Los
     ``psi`` se pasan tal cual para que el kernel los actualice in situ.
     """
+
+    def full(c, psi):
+        return np.ascontiguousarray(np.broadcast_to(c, psi.shape))
+
+    if cp.ratio > 0:
+        cross = (cp.ml, cp.mr_start, cp.a_cl.ravel(), cp.b_cl.ravel(), cp.a_cr.ravel(), cp.b_cr.ravel(),
+                 cp.psi_cl, cp.psi_cr)
+    else:
+        e1, e2 = np.zeros(0, np.float32), np.zeros((0, 0), np.float32)
+        other = cp.psi_l.shape[0] if cp.axis == 1 else cp.psi_l.shape[1]
+        cross = (0, other, e1, e1, e1, e1, e2, e2)
     return (
         cp.nl,
         cp.nr_start,
-        cp.a_l.ravel(),
-        cp.b_l.ravel(),
-        cp.a_r.ravel(),
-        cp.b_r.ravel(),
+        full(cp.a_l, cp.psi_l),
+        full(cp.b_l, cp.psi_l),
+        full(cp.a_r, cp.psi_r),
+        full(cp.b_r, cp.psi_r),
         cp.psi_l,
         cp.psi_r,
+        *cross,
     )
 
 
@@ -60,13 +74,29 @@ def _row_dx(f, out, i, forward, c1, c2, p):
             out[j] = (f[i, j] - f[i, j - 1]) * c1 + (f[i, j + 1] - f[i, j - 2]) * c2
     # La CPML sólo actúa en las franjas de los extremos
     for j in range(lo, min(p[0], hi)):
-        psi = p[3][j] * p[6][i, j] + p[2][j] * out[j]
+        psi = p[3][i, j] * p[6][i, j] + p[2][i, j] * out[j]
         p[6][i, j] = psi
         out[j] += psi
     for j in range(max(p[1], lo), hi):
         k = j - p[1]
-        psi = p[5][k] * p[7][i, k] + p[4][k] * out[j]
+        psi = p[5][i, k] * p[7][i, k] + p[4][i, k] * out[j]
         p[7][i, k] = psi
+        out[j] += psi
+    # M-PML: filas de las capas de arriba y abajo, entre las franjas propias (ninguna si ratio = 0)
+    if i < p[8]:
+        _cross_row(out, i, p[10][i], p[11][i], p[14], max(p[0], lo), min(p[1], hi), p[0])
+    elif i >= p[9]:
+        r = i - p[9]
+        _cross_row(out, r, p[12][r], p[13][r], p[15], max(p[0], lo), min(p[1], hi), p[0])
+
+
+@njit(cache=True, inline="always")
+def _cross_row(out, r, a, b, psi_c, j0, j1, offset):
+    """Recursión CPML con coeficientes ``(a, b)`` en ``out[j0:j1]``, memoria en la fila ``r`` de ``psi_c``."""
+    for j in range(j0, j1):
+        k = j - offset
+        psi = b * psi_c[r, k] + a * out[j]
+        psi_c[r, k] = psi
         out[j] += psi
 
 
@@ -86,17 +116,27 @@ def _row_dz(f, out, i, forward, c1, c2, p):
         for j in range(nx):
             out[j] = (f[i, j] - f[i - 1, j]) * c1 + (f[i + 1, j] - f[i - 2, j]) * c2
     if i < p[0]:
-        a, b = p[2][i], p[3][i]
         for j in range(nx):
-            psi = b * p[6][i, j] + a * out[j]
+            psi = p[3][i, j] * p[6][i, j] + p[2][i, j] * out[j]
             p[6][i, j] = psi
             out[j] += psi
     elif i >= p[1]:
         k = i - p[1]
-        a, b = p[4][k], p[5][k]
         for j in range(nx):
-            psi = b * p[7][k, j] + a * out[j]
+            psi = p[5][k, j] * p[7][k, j] + p[4][k, j] * out[j]
             p[7][k, j] = psi
+            out[j] += psi
+    else:
+        # M-PML: columnas de las capas laterales (vacío si ratio = 0)
+        r = i - p[0]
+        for j in range(p[8]):
+            psi = p[11][j] * p[14][r, j] + p[10][j] * out[j]
+            p[14][r, j] = psi
+            out[j] += psi
+        for j in range(p[9], nx):
+            k = j - p[9]
+            psi = p[13][k] * p[15][r, k] + p[12][k] * out[j]
+            p[15][r, k] = psi
             out[j] += psi
 
 
@@ -117,16 +157,36 @@ def velocity_kernel(vx, vz, sxx, szz, sxz, dtbx, dtbz, c1, c2, p_sxx_x, p_sxz_z,
             vz[i, j] += (a[j] + b[j]) * dtbz[i, j]
 
 
+@njit(cache=True, inline="always")
+def _relax(stress, r_arr, m, i, j, forcing, a, b):
+    """Memoria ``m`` por Crank-Nicolson: devuelve ``stress + (r_new + r_old)/2`` y guarda ``r_new = a r - b F``.
+
+    Los escalares de memoria son float64 (como en NumPy): se multiplica en
+    doble precisión y se redondea al guardar.
+    """
+    r = r_arr[m, i, j]
+    stress = stress + F32(r * (0.5 * (1.0 + a)))
+    stress = stress - F32(forcing * (0.5 * b))
+    r_arr[m, i, j] = F32(r * a) - F32(forcing * b)
+    return stress
+
+
 @njit(parallel=True, cache=True)
 def stress_kernel(
     vx, vz, sxx, szz, sxz, rxx, rzz, rxz,
     dt_pi, dt_mu2, dt_mu_xz, dt_pi_t, dt_mu2_t, dt_mu_t_xz, mem_a, mem_b,
     has_shear, c1, c2, p_exx, p_ezz, p_exz_a, p_exz_b,
+    aniso, dt_c11, dt_c33, dt_c13, dt_c11_t, dt_c33_t, dt_c13_t,
 ):  # fmt: skip
     """Deformaciones, tensiones y memorias viscoelásticas (Crank-Nicolson).
 
-    ``rxx``, ``rzz``, ``rxz`` son pilas ``(n_mech, nz, nx)``; con ``n_mech = 0``
-    el bucle de memorias no se ejecuta y los coeficientes ``*_t`` no se leen.
+    ``rxx``, ``rzz``, ``rxz`` y los coeficientes ``*_t`` (uno por mecanismo)
+    son pilas ``(n_mech, nz, nx)``; con ``n_mech = 0`` el bucle de memorias no
+    se ejecuta y los coeficientes no se leen.
+
+    Con ``aniso`` las tensiones normales usan ``dt_c11``, ``dt_c33`` y
+    ``dt_c13`` (y sus memorias ``*_t``) en lugar de ``dt_pi`` y ``dt_mu2``. La
+    rama se elige por fila: el camino isótropo no paga nada por ella.
     """
     nz, nx = vx.shape
     n_mech = mem_a.shape[0]
@@ -139,41 +199,58 @@ def stress_kernel(
         _row_dz(vz, row_ezz, i, False, c1, c2, p_ezz)
         _row_dz(vx, row_a, i, True, c1, c2, p_exz_a)
         _row_dx(vz, row_b, i, True, c1, c2, p_exz_b)
-        for j in range(nx):
-            exx, ezz, exz = row_exx[j], row_ezz[j], row_a[j] + row_b[j]
+        if aniso:
+            for j in range(nx):
+                exx, ezz, exz = row_exx[j], row_ezz[j], row_a[j] + row_b[j]
+                sx = (sxx[i, j] + dt_c11[i, j] * exx) + dt_c13[i, j] * ezz
+                sz = (szz[i, j] + dt_c13[i, j] * exx) + dt_c33[i, j] * ezz
+                sxz_v = sxz[i, j]
+                if has_shear:
+                    sxz_v += dt_mu_xz[i, j] * exz
+                shear_xz = has_shear and dt_mu_xz[i, j] != F32(0.0)
+                for m in range(n_mech):
+                    a, b = mem_a[m], mem_b[m]
+                    f_xx = dt_c11_t[m, i, j] * exx + dt_c13_t[m, i, j] * ezz
+                    f_zz = dt_c13_t[m, i, j] * exx + dt_c33_t[m, i, j] * ezz
+                    sx = _relax(sx, rxx, m, i, j, f_xx, a, b)
+                    sz = _relax(sz, rzz, m, i, j, f_zz, a, b)
+                    if shear_xz:
+                        sxz_v = _relax(sxz_v, rxz, m, i, j, dt_mu_t_xz[m, i, j] * exz, a, b)
+                sxx[i, j] = sx
+                szz[i, j] = sz
+                sxz[i, j] = sxz_v
+        else:
+            for j in range(nx):
+                exx, ezz, exz = row_exx[j], row_ezz[j], row_a[j] + row_b[j]
 
-            div = exx + ezz
-            a1 = dt_pi[i, j] * div
-            sx = (sxx[i, j] + a1) - dt_mu2[i, j] * ezz
-            sz = (szz[i, j] + a1) - dt_mu2[i, j] * exx
-            sxz_v = sxz[i, j]
-            if has_shear:
-                sxz_v += dt_mu_xz[i, j] * exz
+                div = exx + ezz
+                a1 = dt_pi[i, j] * div
+                sx = (sxx[i, j] + a1) - dt_mu2[i, j] * ezz
+                sz = (szz[i, j] + a1) - dt_mu2[i, j] * exx
+                sxz_v = sxz[i, j]
+                if has_shear:
+                    sxz_v += dt_mu_xz[i, j] * exz
 
-            if n_mech > 0:
-                vol = dt_pi_t[i, j] * div
-                f_xx = vol - dt_mu2_t[i, j] * ezz
-                f_zz = vol - dt_mu2_t[i, j] * exx
-                f_xz = dt_mu_t_xz[i, j] * exz
-                for l in range(n_mech):
-                    a, b = mem_a[l], mem_b[l]
-                    half_a, half_b = 0.5 * (1.0 + a), 0.5 * b
-                    # Los escalares de memoria son float64 (como en NumPy): se
-                    # multiplica en doble precisión y se redondea al guardar
-                    r = rxx[l, i, j]
-                    sx = sx + F32(r * half_a)
-                    sx = sx - F32(f_xx * half_b)
-                    rxx[l, i, j] = F32(r * a) - F32(f_xx * b)
-                    r = rzz[l, i, j]
-                    sz = sz + F32(r * half_a)
-                    sz = sz - F32(f_zz * half_b)
-                    rzz[l, i, j] = F32(r * a) - F32(f_zz * b)
-                    if has_shear:
-                        r = rxz[l, i, j]
-                        sxz_v = sxz_v + F32(r * half_a)
-                        sxz_v = sxz_v - F32(f_xz * half_b)
-                        rxz[l, i, j] = F32(r * a) - F32(f_xz * b)
+                # Sin cizalla (fluido) los coeficientes de cizalla de las memorias son
+                # nulos y rxz no sale de cero: no se leen. Es la mayoría de la malla
+                # y el bucle está limitado por el ancho de banda de memoria.
+                fluid = dt_mu2[i, j] == F32(0.0)
+                shear_xz = has_shear and dt_mu_xz[i, j] != F32(0.0)
+                for m in range(n_mech):
+                    # Cada mecanismo tiene su propio peso: coeficientes (L, nz, nx)
+                    a, b = mem_a[m], mem_b[m]
+                    vol = dt_pi_t[m, i, j] * div
+                    if fluid:
+                        f_xx = vol
+                        f_zz = vol
+                    else:
+                        f_xx = vol - dt_mu2_t[m, i, j] * ezz
+                        f_zz = vol - dt_mu2_t[m, i, j] * exx
+                    sx = _relax(sx, rxx, m, i, j, f_xx, a, b)
+                    sz = _relax(sz, rzz, m, i, j, f_zz, a, b)
+                    if shear_xz:
+                        sxz_v = _relax(sxz_v, rxz, m, i, j, dt_mu_t_xz[m, i, j] * exz, a, b)
 
-            sxx[i, j] = sx
-            szz[i, j] = sz
-            sxz[i, j] = sxz_v
+                sxx[i, j] = sx
+                szz[i, j] = sz
+                sxz[i, j] = sxz_v
