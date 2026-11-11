@@ -47,6 +47,22 @@ from .medium import ElasticMedium, christoffel_speeds, elastic_medium
 
 C1, C2 = 9.0 / 8.0, -1.0 / 24.0
 
+#: Cociente de la M-PML (``ElasticSolver(pml_ratio=...)``, ver ``core.pml.CPMLDerivative``). Con la CPML
+#: clásica (0) una placa sólida que atraviesa la capa (la cortical en los fantomas longitudinales) es
+#: inestable: sus modos de Lamb retrógrados (S1 entre el ZGV y el corte) se amplifican dentro de la capa
+#: (Bécache, Fauqueux & Joly, J Comput Phys 188:399, 2003). El análisis de autovalores de la capa con
+#: coeficientes congelados y las simulaciones de 40 000 pasos piden p ≥ 0.3-0.5
+#: (``docs/validacion/estabilidad.md``). Precio: la capa refleja más (−53 dB en agua, −28 dB en hueso).
+PML_RATIO = 0.5
+
+#: Cada derivada con CPML: (eje, ¿nodo desplazado media celda a lo largo del eje?, ¿y a lo largo del otro?).
+#: Las de tensión viven en los nodos de velocidad (vx en (i+1/2, j), vz en (i, j+1/2)) y las de velocidad
+#: en los de tensión (sxx, szz en (i, j); sxz en (i+1/2, j+1/2)).
+_DERIVATIVE_NODES = {
+    "sxx_x": (1, True, False), "sxz_z": (0, False, True), "sxz_x": (1, False, True), "szz_z": (0, True, False),
+    "exx": (1, False, False), "ezz": (0, False, False), "exz_a": (0, True, True), "exz_b": (1, True, True),
+}
+
 
 @dataclass
 class Source:
@@ -124,6 +140,7 @@ class ElasticSolver:
         dtype=np.float32,
         backend: str = "auto",
         anisotropic_bone: bool = False,
+        pml_ratio: float = PML_RATIO,
     ):
         self.backend = self._resolve_backend(backend, dtype)
         self.phantom = phantom
@@ -211,16 +228,11 @@ class ElasticSolver:
         self.tmp_x = np.zeros((shape[0], shape[1] - 3), dtype)
         self.tmp_z = np.zeros((shape[0] - 3, shape[1]), dtype)
 
-        cp_kw = dict(npml=npml, dx=dx, dt=dt, c_max=cp_u_max, f_ref=f0, dtype=dtype)
+        cp_kw = dict(npml=npml, dx=dx, dt=dt, c_max=cp_u_max, f_ref=f0, dtype=dtype, ratio=pml_ratio)
+        # (eje, nodo desplazado a lo largo del eje, nodo desplazado a lo largo del otro eje)
         self.pml = {
-            "sxx_x": CPMLDerivative(shape, 1, True, **cp_kw),
-            "sxz_z": CPMLDerivative(shape, 0, False, **cp_kw),
-            "sxz_x": CPMLDerivative(shape, 1, False, **cp_kw),
-            "szz_z": CPMLDerivative(shape, 0, True, **cp_kw),
-            "exx": CPMLDerivative(shape, 1, False, **cp_kw),
-            "ezz": CPMLDerivative(shape, 0, False, **cp_kw),
-            "exz_a": CPMLDerivative(shape, 0, True, **cp_kw),
-            "exz_b": CPMLDerivative(shape, 1, True, **cp_kw),
+            name: CPMLDerivative(shape, ax, st, staggered_other=st_o, **cp_kw)
+            for name, (ax, st, st_o) in _DERIVATIVE_NODES.items()
         }
         self.npml = npml
         # Fuera de la CPML (sus memorias psi no se tocan) y lejos de los bordes de los buffers
