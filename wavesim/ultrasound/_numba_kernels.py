@@ -31,18 +31,32 @@ F32 = np.float32
 def pack_pml(cp) -> tuple:
     """Empaqueta una ``CPMLDerivative`` en una tupla que Numba sabe recibir.
 
-    Los coeficientes se aplanan a 1D (a lo largo del eje de la derivada); los
+    Los coeficientes de las franjas propias se pasan como arrays 2D de la
+    forma de su ``psi`` (con M-PML dependen de las dos coordenadas en las
+    esquinas) y los de las franjas de la otra dirección, aplanados a 1D. Los
     ``psi`` se pasan tal cual para que el kernel los actualice in situ.
     """
+
+    def full(c, psi):
+        return np.ascontiguousarray(np.broadcast_to(c, psi.shape))
+
+    if cp.ratio > 0:
+        cross = (cp.ml, cp.mr_start, cp.a_cl.ravel(), cp.b_cl.ravel(), cp.a_cr.ravel(), cp.b_cr.ravel(),
+                 cp.psi_cl, cp.psi_cr)
+    else:
+        e1, e2 = np.zeros(0, np.float32), np.zeros((0, 0), np.float32)
+        other = cp.psi_l.shape[0] if cp.axis == 1 else cp.psi_l.shape[1]
+        cross = (0, other, e1, e1, e1, e1, e2, e2)
     return (
         cp.nl,
         cp.nr_start,
-        cp.a_l.ravel(),
-        cp.b_l.ravel(),
-        cp.a_r.ravel(),
-        cp.b_r.ravel(),
+        full(cp.a_l, cp.psi_l),
+        full(cp.b_l, cp.psi_l),
+        full(cp.a_r, cp.psi_r),
+        full(cp.b_r, cp.psi_r),
         cp.psi_l,
         cp.psi_r,
+        *cross,
     )
 
 
@@ -60,13 +74,29 @@ def _row_dx(f, out, i, forward, c1, c2, p):
             out[j] = (f[i, j] - f[i, j - 1]) * c1 + (f[i, j + 1] - f[i, j - 2]) * c2
     # La CPML sólo actúa en las franjas de los extremos
     for j in range(lo, min(p[0], hi)):
-        psi = p[3][j] * p[6][i, j] + p[2][j] * out[j]
+        psi = p[3][i, j] * p[6][i, j] + p[2][i, j] * out[j]
         p[6][i, j] = psi
         out[j] += psi
     for j in range(max(p[1], lo), hi):
         k = j - p[1]
-        psi = p[5][k] * p[7][i, k] + p[4][k] * out[j]
+        psi = p[5][i, k] * p[7][i, k] + p[4][i, k] * out[j]
         p[7][i, k] = psi
+        out[j] += psi
+    # M-PML: filas de las capas de arriba y abajo, entre las franjas propias (ninguna si ratio = 0)
+    if i < p[8]:
+        _cross_row(out, i, p[10][i], p[11][i], p[14], max(p[0], lo), min(p[1], hi), p[0])
+    elif i >= p[9]:
+        r = i - p[9]
+        _cross_row(out, r, p[12][r], p[13][r], p[15], max(p[0], lo), min(p[1], hi), p[0])
+
+
+@njit(cache=True, inline="always")
+def _cross_row(out, r, a, b, psi_c, j0, j1, offset):
+    """Recursión CPML con coeficientes ``(a, b)`` en ``out[j0:j1]``, memoria en la fila ``r`` de ``psi_c``."""
+    for j in range(j0, j1):
+        k = j - offset
+        psi = b * psi_c[r, k] + a * out[j]
+        psi_c[r, k] = psi
         out[j] += psi
 
 
@@ -86,17 +116,27 @@ def _row_dz(f, out, i, forward, c1, c2, p):
         for j in range(nx):
             out[j] = (f[i, j] - f[i - 1, j]) * c1 + (f[i + 1, j] - f[i - 2, j]) * c2
     if i < p[0]:
-        a, b = p[2][i], p[3][i]
         for j in range(nx):
-            psi = b * p[6][i, j] + a * out[j]
+            psi = p[3][i, j] * p[6][i, j] + p[2][i, j] * out[j]
             p[6][i, j] = psi
             out[j] += psi
     elif i >= p[1]:
         k = i - p[1]
-        a, b = p[4][k], p[5][k]
         for j in range(nx):
-            psi = b * p[7][k, j] + a * out[j]
+            psi = p[5][k, j] * p[7][k, j] + p[4][k, j] * out[j]
             p[7][k, j] = psi
+            out[j] += psi
+    else:
+        # M-PML: columnas de las capas laterales (vacío si ratio = 0)
+        r = i - p[0]
+        for j in range(p[8]):
+            psi = p[11][j] * p[14][r, j] + p[10][j] * out[j]
+            p[14][r, j] = psi
+            out[j] += psi
+        for j in range(p[9], nx):
+            k = j - p[9]
+            psi = p[13][k] * p[15][r, k] + p[12][k] * out[j]
+            p[15][r, k] = psi
             out[j] += psi
 
 
