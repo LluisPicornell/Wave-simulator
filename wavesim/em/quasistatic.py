@@ -21,8 +21,12 @@ problema es 2D, las corrientes son por metro de profundidad (A/m) y las
 conductancias de cara son directamente ``sigma*`` (S/m).
 
 El sistema es complejo simétrico (no hermítico), así que se resuelve con
-COCG (gradiente conjugado con el producto bilineal sin conjugar) y
-precondicionador de Jacobi, sin formar la matriz, igual que ``optics``.
+COCG (gradiente conjugado con el producto bilineal sin conjugar), sin formar
+la matriz, igual que ``optics``. Con la piel (100 veces menos conductora que
+el músculo) Jacobi necesita del orden de mil iteraciones; el precondicionador
+por defecto es un multigrid de agregación (``em.multigrid``, necesita Numba)
+que las baja a unas decenas. Las 16 inyecciones de EIT comparten la matriz,
+así que la jerarquía se construye una vez por solver.
 
 Tomografía de impedancia eléctrica (EIT): se inyecta corriente entre pares de
 electrodos adyacentes y se mide la tensión entre los demás pares adyacentes.
@@ -47,6 +51,7 @@ import numpy as np
 
 from ..materials import dielectric
 from ..phantoms.phantom import TISSUE_INDEX, Phantom
+from .multigrid import Multigrid
 
 NON_TISSUE = ("water", "air")
 
@@ -66,6 +71,33 @@ def tissue_mask(phantom: Phantom) -> np.ndarray:
     return ~np.isin(phantom.labels, [TISSUE_INDEX[k] for k in NON_TISSUE])
 
 
+def resolve_preconditioner(name: str) -> str:
+    """``"auto"`` -> ``"multigrid"`` si Numba está instalado y ``"jacobi"`` si no."""
+    if name not in ("auto", "multigrid", "jacobi"):
+        raise ValueError(f"precondicionador desconocido '{name}' (use 'auto', 'multigrid' o 'jacobi')")
+    if name == "jacobi":
+        return name
+    try:
+        import numba  # noqa: F401
+    except ImportError:
+        if name == "multigrid":
+            raise ImportError("El precondicionador 'multigrid' requiere Numba: instálalo con "
+                              "`pip install wavesim[fast]` o usa preconditioner='jacobi'.") from None
+        return "jacobi"
+    return "multigrid"
+
+
+def norm2(a: np.ndarray) -> float:
+    """Norma euclídea de un array real o complejo, sin pasar por BLAS.
+
+    ``np.linalg.norm`` (y ``vdot``) llaman a un ``dot`` de OpenBLAS multihilo; con la CPU compartida los hilos se
+    esperan unos a otros y una sola norma de 200x200 llegaba a costar 10 ms, el 90 % del tiempo del COCG. Una suma
+    de NumPy es determinista, no usa hilos y cuesta ~0.1 ms.
+    """
+    a = np.asarray(a)
+    return float(np.sqrt(np.sum(a.real * a.real + a.imag * a.imag)))
+
+
 @dataclass
 class PotentialResult:
     phi: np.ndarray  # potencial complejo (V), forma (nz, nx); referencia de media nula si no hay Dirichlet
@@ -83,10 +115,15 @@ class QuasiStaticSolver:
     celda: la usa el modelo completo de electrodo para el contacto (término de
     Robin ``g (phi - U)``, con ``U`` en el lado derecho). Con ella el operador
     deja de ser singular y ``solve`` no necesita referencia de media nula.
+
+    ``preconditioner``: ``"auto"`` (multigrid si Numba está instalado, si no Jacobi), ``"multigrid"`` o
+    ``"jacobi"``. Cambian el número de iteraciones, no la solución (a la tolerancia pedida).
     """
 
     def __init__(self, phantom: Phantom, f: float, admittivity_map: np.ndarray | None = None,
-                 shunt: np.ndarray | None = None):
+                 shunt: np.ndarray | None = None, preconditioner: str = "auto"):
+        self.preconditioner = resolve_preconditioner(preconditioner)
+        self._mg: Multigrid | None = None
         self.phantom = phantom
         self.grid = phantom.grid
         self.f = float(f)
@@ -132,6 +169,18 @@ class QuasiStaticSolver:
             out += self._shunt * phi
         return out
 
+    def _multigrid(self, free: np.ndarray, cache: bool) -> Multigrid:
+        """Jerarquía para las celdas libres: sólo las caras entre celdas libres quedan fuera de la diagonal."""
+        if cache and self._mg is not None:
+            return self._mg
+        fx = np.where(free[:, :-1] & free[:, 1:], self.face_x, 0.0)
+        fz = np.where(free[:-1, :] & free[1:, :], self.face_z, 0.0)
+        diag = np.where(free, self._diag, 0.0)
+        mg = Multigrid(fx, fz, diag)
+        if cache:
+            self._mg = mg
+        return mg
+
     def solve(self, source: np.ndarray | None = None, fixed: np.ndarray | None = None,
               fixed_values: complex | np.ndarray = 0.0, tol: float = 1e-10, max_iter: int = 20_000) -> PotentialResult:
         """Potencial para una corriente inyectada ``source`` (A/m por celda) y/o celdas a potencial fijo.
@@ -157,11 +206,17 @@ class QuasiStaticSolver:
 
         # Se eliminan las celdas fijas: se resuelve sólo en las libres con el término de contorno en el lado derecho
         r = np.where(free, b - self.apply(phi0), 0.0)
-        bnorm = np.linalg.norm(r)
+        bnorm = norm2(r)
         x = np.zeros(shape, dtype=complex)
         it, res = 0, 0.0
         if bnorm > 0.0:
-            z = r / self._diag
+            if self.preconditioner == "multigrid":
+                # Con celdas fijas la matriz cambia con ellas: se reconstruye (barato frente al COCG)
+                precond = self._multigrid(free, cache=fixed is None).apply
+            else:
+                def precond(v):
+                    return v / self._diag
+            z = precond(r)
             p = z.copy()
             rz = np.sum(r * z)  # producto bilineal (sin conjugar): el sistema es simétrico, no hermítico
             res = 1.0
@@ -170,10 +225,10 @@ class QuasiStaticSolver:
                 alpha = rz / np.sum(p * ap)
                 x += alpha * p
                 r -= alpha * ap
-                res = np.linalg.norm(r) / bnorm
+                res = norm2(r) / bnorm
                 if res < tol:
                     break
-                z = r / self._diag
+                z = precond(r)
                 rz_new = np.sum(r * z)
                 p = z + (rz_new / rz) * p
                 rz = rz_new
