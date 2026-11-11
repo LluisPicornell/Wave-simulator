@@ -356,9 +356,9 @@ que no son dependencias del proyecto.
   dispersor puntual sale 9-17 % mayor que la teoría y ninguna variante de
   formación de haz mejora de forma clara la visibilidad de la fisura de 0.15 mm
   (sin ruido electrónico ni observador). La corrección de interfaz y la M-PML
-  tienen costes: la M-PML refleja −28 dB (amplitud) en el hueso. Un fantoma
-  osteoporótico realista sin atenuación crece despacio con tiempos muy largos
-  (sin investigar). La anisotropía de la cortical sólo está alineada con la
+  tienen costes: la M-PML refleja −28 dB (amplitud) en el hueso. La inestabilidad
+  de la tibia osteoporótica realista (su cortical cruzaba la CPML) está corregida
+  por la M-PML ([estabilidad](docs/validacion/estabilidad.md)). La anisotropía de la cortical sólo está alineada con la
   malla y el valor de c13 no está verificado.
 - **Maxwell**: 2D TM, sin antenas ni fuentes reales; la fuente de onda plana de
   banda ancha debe estar en una zona homogénea; el error de campo fuera del
