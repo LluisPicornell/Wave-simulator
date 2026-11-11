@@ -348,7 +348,7 @@ def _updown(X0, X1, kz, z0, z1):
 
 def beam_reflection(theta_deg: float, ppw: float = 15.0, sigma_lam: float = 4.0,
                     freqs=(0.8e6, 0.9e6, 1.0e6, 1.1e6, 1.2e6), dtheta: float = 12.0, n_theta: int = 97,
-                    backend: str = "auto", solid_lam: float = 6.0, f0: float = F0) -> dict:
+                    backend: str = "auto", solid_lam: float = 6.0, f0: float = F0, factory=None) -> dict:
     """R(θ) y amplitud de la S transmitida para un haz gaussiano que incide desde el agua sobre la cortical.
 
     Montaje (de arriba abajo): CPML, fila de fuentes de presión con retardo
@@ -375,6 +375,9 @@ def beam_reflection(theta_deg: float, ppw: float = 15.0, sigma_lam: float = 4.0,
     Sólo se devuelven los pares (f, θ) en los que el haz incidente tiene al
     menos el 30 % de su máximo a esa frecuencia: el haz cubre unos ±2σ_θ
     alrededor de ``theta_deg``, con ``σ_θ = 1 / (k σ cosθ)``.
+
+    ``factory``: sustituto de ``make_solver`` con su misma firma (otro código
+    con la interfaz de ``ElasticSolver``; ``benchmarks/cross_ultrasonido.py``).
     """
     rho1, c1, _ = WATER
     rho2, cp2, cs2 = BONE
@@ -399,7 +402,7 @@ def beam_reflection(theta_deg: float, ppw: float = 15.0, sigma_lam: float = 4.0,
     t_end = delay.max() + 6 * lam / (c1 * np.cos(th0)) + 12e-6 + (12e-6 if theta_deg > 45 else 0.0)
     solid_rows = [j_int + 2 + m for m in range(6)]
     rho, cp, cs = layered(nz, nx, [(0, WATER), (j_int, BONE)])
-    s = make_solver(rho, cp, cs, dx, f0, 0.9, backend)
+    s = (factory or make_solver)(rho, cp, cs, dx, f0, 0.9, backend)
     dt = s.dt
     nt = int(np.ceil(t_end / dt))
     t = s.time_axis(nt)
@@ -542,7 +545,7 @@ def run_u4(backend="auto", quick=False) -> dict:
 # U5: ondas de Lamb en una placa de cortical
 # ----------------------------------------------------------------------------
 def lamb_plate(fluid=AIR, thickness=3e-3, dx=0.15e-3, length=200e-3, fluid_layer=None, f0=300e3,
-               bandwidth=1.2, t_end=260e-6, backend="auto", decimate=4) -> dict:
+               bandwidth=1.2, t_end=260e-6, backend="auto", decimate=4, factory=None) -> dict:
     """Placa de cortical en ``fluid`` excitada en una columna de celdas; registro a lo largo de ella.
 
     La placa (``thickness`` × ``length``) termina en dos extremos libres a 5 mm
@@ -558,6 +561,8 @@ def lamb_plate(fluid=AIR, thickness=3e-3, dx=0.15e-3, length=200e-3, fluid_layer
     simétricos (S) ``vx`` es par en z, en los antisimétricos (A) lo es ``vz``.
     Devuelve las señales ``S`` y ``A`` (tiempo diezmado × posición) desde 10 mm
     después de la fuente hasta 10 mm antes del extremo derecho.
+
+    ``factory``: como en ``beam_reflection``.
     """
     n_plate = int(round(thickness / dx))
     layer = fluid_layer if fluid_layer is not None else (1e-3 if fluid[0] < 10 else 6e-3)
@@ -571,7 +576,7 @@ def lamb_plate(fluid=AIR, thickness=3e-3, dx=0.15e-3, length=200e-3, fluid_layer
     for a, v in zip((rho, cp, cs), fluid):
         a[:, : NPML + gap] = v
         a[:, nx - NPML - gap:] = v
-    s = make_solver(rho, cp, cs, dx, f0, 0.9, backend)
+    s = (factory or make_solver)(rho, cp, cs, dx, f0, 0.9, backend)
     nt = int(np.ceil(t_end / s.dt))
     t = s.time_axis(nt)
     i_s = NPML + gap + int(round(10e-3 / dx))
