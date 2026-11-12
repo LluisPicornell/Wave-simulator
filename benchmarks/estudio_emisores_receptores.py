@@ -510,12 +510,17 @@ def references() -> dict:
     fmc = FMCData.load(sim_path("normal", "tibia_sana0", "fmc3"))
     rf = np.where(_blank_mask(fmc), 0.0, fmc.rf)
     ref["fmc3"] = float(np.abs(analytic_signal(rf[N_EL // 2, N_EL // 2])).max())
+    # Baja frecuencia: amplitud del primer arribo (la FAS en AT, el pulso transmitido en TT) en el
+    # receptor central, que es la señal que se mide; no el máximo de la traza (la onda directa en AT)
     for f in F_AT:
         d = np.load(sim_path("normal", "tibia_sana0", f"at{f / 1e6:g}L"))
-        ref[f"at{f / 1e6:g}"] = float(np.abs(d["traces"][np.argmin(np.abs(d["x"]))]).max())
+        c = int(np.argmin(np.abs(d["x"])))
+        t_max = pulse_peak_time(f) + abs(d["x"][c] + AT_SRC) / EX11.C_SKIN - 2.2 / f
+        ref[f"at{f / 1e6:g}"] = 10 ** (first_arrival(d["traces"][c], d["t"], t_max, 0.0, f)[1] / 20)
     for f in F_TT:
         d = np.load(sim_path("normal", "tibia_sana0", f"tt{f / 1e6:g}"))
-        ref[f"tt{f / 1e6:g}"] = float(np.abs(d["traces"][np.argmin(np.abs(d["x"]))]).max())
+        c = int(np.argmin(np.abs(d["x"])))
+        ref[f"tt{f / 1e6:g}"] = 10 ** (first_arrival(d["traces"][c], d["t"], d["t"][-1], 0.0, f)[1] / 20)
     path.write_text(json.dumps(ref, indent=1))
     return ref
 
@@ -628,7 +633,8 @@ TT_STATS = ("tof", "energia")
 
 
 def first_arrival(s: np.ndarray, t: np.ndarray, t_max: float, sigma: float, f0: float) -> tuple[float, float]:
-    """Instante del primer arribo (umbral) y su amplitud (dB) antes de ``t_max``; (nan, nan) si no se detecta.
+    """Instante del primer arribo (umbral) y su amplitud (dB) antes de ``t_max``; (nan, nan) si no se detecta
+    o si no queda 1.5 periodos antes de ``t_max`` (criterio del ejemplo 11).
 
     Umbral = máx(25 % del máximo del tramo, 4σ del ruido): un detector de umbral fijo
     referido a la señal, como el de los equipos de ultrasonometría axial.
@@ -647,6 +653,8 @@ def first_arrival(s: np.ndarray, t: np.ndarray, t_max: float, sigma: float, f0: 
     frac = (thr - seg[k - 1]) / (seg[k] - seg[k - 1] + 1e-30)
     dt = t[1] - t[0]
     tof = t[k - 1] + frac * dt
+    if tof > t_max - 1.5 / f0:  # el pulso no cabe antes de t_max (la onda directa): no separable
+        return np.nan, np.nan
     win = (t >= tof) & (t < tof + 1.5 / f0)
     return float(tof), float(20 * np.log10(np.abs(s[win]).max() + 1e-30))
 
