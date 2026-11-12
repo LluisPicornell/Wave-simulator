@@ -83,10 +83,17 @@ Ninguna usa la máscara de la lesión. Se calculan en |x| ≤ 3 mm y "mayor = m�
 - A-scan fijo: −amplitud del eco más fuerte (caída) y energía bajo él (sub. global).
 - Transmisión axial (AT): tiempo del primer arribo (FAS) por umbral (25 % del máximo antes de la onda
   directa y ≥ 4σ; el pulso debe caber 1.5 periodos antes de la onda directa, como en el ejemplo 11).
-  Con 1 receptor, el tiempo de vuelo; con ≥ 2, la pendiente tiempo-distancia por regresión
-  ("lentitud", inversa de la velocidad aparente), el mayor salto de los residuos (≥ 4 receptores) y la
-  pendiente de la amplitud. Bidireccional = media de las pendientes con el emisor en cada extremo
-  (compensa la inclinación del hueso).
+  - **tiempo** (la estadística principal): con 1 receptor, su tiempo de vuelo; con varios, el primer
+    arribo de sus señales **apiladas** (cada traza se retrasa para alinear una onda de velocidad
+    aparente c y se promedian; c se elige entre 2400 y 4200 m/s por la mayor amplitud), referido al
+    receptor más lejano. El ruido independiente de n canales baja √n: es lo que un equipo con varios
+    receptores gana frente a uno solo.
+  - **lentitud** (pendiente tiempo-distancia por regresión, inversa de la velocidad aparente),
+    **salto** (mayor salto de los residuos, ≥ 4 receptores) y **atenuación** (pendiente de la amplitud).
+  - Bidireccional = media de los dos emisores (compensa la inclinación del hueso).
+  - La estadística *tiempo* apilada se añadió **después** de ver los primeros resultados (la pendiente
+    no ve una fractura situada entre el emisor y los receptores, porque sólo retrasa todas las llegadas
+    por igual). No se ajustó con las etiquetas, pero es una elección a posteriori y hay que leerla así.
 - Transmisión a través (TT): con 1 receptor (10 mm), el adelanto del primer arribo y la pérdida de
   energía; con 2, su diferencia; con ≥ 4, la mayor desviación del tiempo de vuelo respecto a una recta a
   lo largo del hueso (anomalía local, independiente del grosor total).
@@ -107,8 +114,11 @@ lesión respecto a la misma pierna sin lesión (gemela), y D_ruido = ese cambio 
 ### Baja frecuencia
 
 - **AT** a 0.5 y 1 MHz: emisor de λ/2 sobre la piel en x = −45 mm y otro en +45 mm (dos simulaciones),
-  41 receptores cada 1 mm en ±20 mm (distancias 25-65 mm); de ellos se toman 1 (el más lejano), 2, 4,
-  8, 16 o 41 repartidos.
+  41 receptores cada 1 mm en ±20 mm (distancias 25-65 mm). A menos de ~49 mm del emisor el FAS no se
+  separa de la onda directa por la piel (medido: detectable en el 0-70 % de las piernas a 25-41 mm y en
+  el 100 % desde 49 mm a 0.5 MHz), así que cada emisor usa sus 17 receptores lejanos (49-65 mm): de
+  ellos se toman 1 (el más lejano), 2, 4, 8 o 17 repartidos. Unidireccional = 1 emisor + n receptores;
+  bidireccional = 2 emisores + 2n receptores (cada emisor con los n lejanos a él).
 - **TT** a 0.5 MHz: línea emisora de ~25 mm (como el ejemplo 11) en la cara anterior y 25 receptores
   puntuales cada 1 mm en ±12 mm bajo la piel posterior; receptores de 10 mm (1), 12 (2), 6 (4), 3 (8)
   o 1 mm (25).

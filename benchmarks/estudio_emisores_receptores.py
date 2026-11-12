@@ -1154,7 +1154,7 @@ def figures(aucs: dict, psf: dict, bodies) -> None:
     keys = ("ascan", "mono_lineas", "mono_saft", "mono1mm_saft", "disp_1x32", "pw1", "pw7", "disp_4x4", "comp_8x8",
             "disp_32x32", "disp_32x32_cf")
     panels = (("superficial", "caida"), ("superficial", "escalon"), ("interna", "sub_local"))
-    fig, axs = plt.subplots(1, len(panels), figsize=(14, 4))
+    fig, axs = plt.subplots(1, len(panels), figsize=(14, 4.6))
     snr_x = np.array([60.0 if np.isinf(s) else s for s in SNR_DB])
     for ax, (group, st) in zip(axs, panels):
         for k, key in enumerate(keys):
@@ -1167,8 +1167,8 @@ def figures(aucs: dict, psf: dict, bodies) -> None:
         ax.set_ylabel("AUC")
         ax.set_ylim(0.3, 1.02)
         ax.set_title(f"{body}: {group}, estadística '{st}'", fontsize=9)
-    axs[-1].legend(fontsize=6, loc="lower left")
-    fig.tight_layout()
+    fig.legend(*axs[0].get_legend_handles_labels(), loc="lower center", ncol=6, fontsize=7)  # fuera de los paneles
+    fig.tight_layout(rect=(0, 0.1, 1, 1))
     fig.savefig(img_dir / "estudio_ruido.png", dpi=90)
     plt.close(fig)
 
