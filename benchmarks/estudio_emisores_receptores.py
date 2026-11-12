@@ -22,8 +22,8 @@ Diseño (detalles y resultados en docs/estudio_emisores_receptores.md):
 2. Ruido electrónico gaussiano filtrado a la banda, añadido a cada disparo físico (nunca a la FMC antes de
    sumar emisiones), con SNR por canal de 40, 20 y 0 dB respecto al eco cortical de un disparo de un
    elemento en la pierna sana de referencia (cuerpo normal); 3 realizaciones.
-3. 0.5 y 1 MHz: transmisión axial (AT) con emisores en los dos extremos y 41 receptores (de ellos se
-   eligen 1-41), y transmisión a través (TT, 0.5 MHz) con 25 receptores puntuales al otro lado.
+3. 0.5 y 1 MHz: transmisión axial (AT) con emisores en los dos extremos y 41 receptores (cada emisor usa
+   1-17 de sus 17 lejanos, apilados), y transmisión a través (TT, 0.5 MHz) con 25 receptores puntuales.
 4. Detección: negativos = piernas sanas con otra semilla (grosores ±10 %, inclinación del hueso ~N(0, 2°),
    rugosidad y microestructura); positivos = lesiones del ejemplo 11 en varias posiciones y anatomías.
    Estadísticas sin verdad de terreno y AUC con IC por bootstrap de fantomas.
