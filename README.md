@@ -193,6 +193,19 @@ cuerpo obeso la onda guiada por la cortical (AT) deja de separarse de la
 onda directa a baja frecuencia. Límites: corte 2D (la tibia real es un tubo),
 hueso isótropo y sin porosidad, simulación sin ruido.
 
+### ¿Cuántos emisores y receptores necesita un aparato portátil?
+
+[docs/estudio_emisores_receptores.md](docs/estudio_emisores_receptores.md)
+(`benchmarks/estudio_emisores_receptores.py`, 281 simulaciones con ruido
+electrónico y piernas sanas distintas como negativos) compara desde un solo
+transductor hasta una sonda de 32 × 32. En imagen a 3 MHz la detección de una
+fractura desplazada crece con emisores × receptores (AUC 0.38 con 1 × 1, 0.93
+con 8 × 8), y emitir con todos los elementos a la vez es lo que más rinde por
+canal. En transmisión axial a 0.5-1 MHz basta 1 emisor + 1 receptor con buena
+electrónica (AUC 0.84-0.94); más receptores sólo dan robustez al ruido, y en
+el cuerpo obeso la técnica falla. Muestra pequeña (6 sanas frente a 2-3 de
+cada lesión): son tendencias, no cifras de sensibilidad.
+
 ### Modo realista: hueso poroso, trabéculas y fascias
 
 ![Fantoma básico frente a realista](docs/img/12_realismo.png)
@@ -261,7 +274,7 @@ docs/           comparativa con otros simuladores y resultados de validación
 
 ## Validación
 
-`pytest` (460 tests, unos 4 min con 4 hilos de Numba) compara cada solver con
+`pytest` (467 tests, unos 4 min con 4 hilos de Numba) compara cada solver con
 soluciones analíticas y comprueba los fantomas y los datasets. Los benchmarks
 de `benchmarks/` repiten las comparaciones con más resolución y escriben sus
 tablas en [`docs/validacion/`](docs/validacion/) (un documento por tema, con
