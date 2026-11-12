@@ -46,7 +46,8 @@ from wavesim.analysis import dilate, resample_mask, residual_db
 from wavesim.core.signals import analytic_signal, pulse_duration, pulse_peak_time
 from wavesim.phantoms import BODY_TYPES, longitudinal_limb, random_limb_spec
 from wavesim.ultrasound import ElasticSolver, LinearArray, das_plane_wave, line_receiver
-from wavesim.ultrasound.fmc import FMCData, acquire_fmc, band_noise, delayed_pairs, pair_image, synthesize_rf
+from wavesim.ultrasound.fmc import (FMCData, acquire_fmc, band_noise, delayed_pairs, fractional_delay, pair_image,
+                                    synthesize_rf)
 from wavesim.ultrasound.quality import fwhm_1d, point_scatterer_medium, water_phantom
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -626,9 +627,15 @@ def analyse_psf() -> dict:
 # Baja frecuencia: transmisión axial (AT) y a través (TT)
 # --------------------------------------------------------------------------
 LOW_SNR_DB = (np.inf, 40.0, 20.0)
-AT_NS = (1, 2, 4, 8, 16, 41)
+AT_NS = (1, 2, 4, 8, 17)
+# Receptores útiles en AT: a menos de ~49 mm del emisor el primer arribo por el hueso (FAS) no se
+# separa de la onda directa por la piel (medido: FAS detectable en el 0-70 % de las piernas a
+# 25-41 mm y en el 100 % desde 49 mm a 0.5 MHz), así que cada emisor usa los 17 receptores lejanos
+AT_MIN_OFFSET = 49e-3
 TT_NS = (1, 2, 4, 8, 25)
-AT_STATS = ("lentitud", "salto", "atenuacion")
+AT_STATS = ("tiempo", "lentitud", "salto", "atenuacion")
+# Velocidades de prueba del apilado (velocidad aparente del FAS medida en las piernas sanas: 2500-3600 m/s)
+C_STACK = np.arange(2400.0, 4201.0, 200.0)
 TT_STATS = ("tof", "energia")
 
 
@@ -667,14 +674,39 @@ def _fit(x, y):
     return float(a), y - (a * x + b)
 
 
-def _at_dir(tof, amp, off, idx) -> np.ndarray:
-    """(lentitud o tiempo de vuelo, salto, atenuación) de una dirección con los receptores ``idx``."""
+def stacked_arrival(tr: np.ndarray, t: np.ndarray, off: np.ndarray, idx: np.ndarray, sigma: float,
+                    f0: float) -> float:
+    """Tiempo del primer arribo de las trazas ``idx`` apiladas, referido al receptor más lejano.
+
+    Cada traza se retrasa ``(off_ref − off_j)/c`` para alinear una onda de velocidad aparente
+    ``c`` y se promedian: el ruido independiente de n canales baja √n, que es lo que un
+    equipo con varios receptores gana frente a uno solo. ``c`` se elige entre ``C_STACK`` por
+    la mayor amplitud del primer arribo (apilado inclinado). Con un receptor es su primer arribo.
+    """
+    tp = pulse_peak_time(f0)
+    ref = off[idx].max()
     if idx.size == 1:
-        return np.array([tof[idx[0]], np.nan, -amp[idx[0]]])
+        return first_arrival(tr[idx[0]], t, tp + ref / EX11.C_SKIN - 2.2 / f0, sigma, f0)[0]
+    best_tof, best_amp = np.nan, -np.inf
+    for c in C_STACK:
+        lag = (ref - off[idx]) / c
+        stack = fractional_delay(tr[idx], lag, t[1] - t[0]).mean(0)
+        # la onda directa por la piel de cada receptor, retrasada igual que su traza, marca el límite
+        t_max = tp + np.min(off[idx] / EX11.C_SKIN + lag) - 2.2 / f0
+        tof, amp = first_arrival(stack, t, t_max, sigma / np.sqrt(idx.size), f0)
+        if np.isfinite(tof) and amp > best_amp:
+            best_tof, best_amp = tof, amp
+    return best_tof
+
+
+def _at_dir(stack_tof: float, tof, amp, off, idx) -> np.ndarray:
+    """(tiempo apilado, lentitud, salto, atenuación) de una dirección con los receptores ``idx``."""
+    if idx.size == 1:
+        return np.array([stack_tof, np.nan, np.nan, -amp[idx[0]]])
     slope, res = _fit(off[idx], tof[idx])
     aslope, _ = _fit(off[idx], amp[idx])
     jump = np.nanmax(np.abs(np.diff(res))) if idx.size >= 4 and np.isfinite(res).sum() >= 3 else np.nan
-    return np.array([slope, jump, -aslope])
+    return np.array([stack_tof, slope, jump, -aslope])
 
 
 def analyse_at(body: str, name: str, f0: float, ref: dict) -> dict:
@@ -683,26 +715,27 @@ def analyse_at(body: str, name: str, f0: float, ref: dict) -> dict:
     t, x = dL["t"], dL["x"]
     rng = np.random.default_rng(samples(body)[name][3] + int(f0))
     tp = pulse_peak_time(f0)
-    out = {}
-    per = []  # [nivel][r] -> (tof_L, amp_L, tof_R, amp_R)
-    for s in sigmas(ref[key], LOW_SNR_DB):
-        reals = []
-        for _ in range(N_REAL):
-            row = []
-            for d, src in ((dL, -AT_SRC), (dR, AT_SRC)):
+    far = np.nonzero(x + AT_SRC >= AT_MIN_OFFSET - 1e-6)[0]  # receptores lejanos al emisor izquierdo
+    subsets = {n: far[-1:] if n == 1 else far[np.round(np.linspace(0, far.size - 1, n)).astype(int)] for n in AT_NS}
+    levels = sigmas(ref[key], LOW_SNR_DB)
+    out = {f"{key}_{m}_{n}": np.zeros((len(levels), N_REAL, len(AT_STATS))) for m in ("uni", "bi") for n in AT_NS}
+    for li, s in enumerate(levels):
+        for r in range(N_REAL):
+            sides = []  # por emisor: {n: estadísticas con sus n receptores lejanos}
+            for d, src, mirror in ((dL, -AT_SRC, False), (dR, AT_SRC, True)):
                 tr = d["traces"] + (s * band_noise(d["traces"].shape, t[1] - t[0], f0, 1.0, rng) if s else 0.0)
                 off = np.abs(x - src)
                 fa = [first_arrival(tr[c], t, tp + off[c] / EX11.C_SKIN - 2.2 / f0, s, f0) for c in range(x.size)]
-                row += [np.array([v[0] for v in fa]), np.array([v[1] for v in fa]), off]
-            reals.append(row)
-        per.append(reals)
-    for n in AT_NS:
-        idx = np.array([x.size - 1]) if n == 1 else np.round(np.linspace(0, x.size - 1, n)).astype(int)
-        uni = np.array([[_at_dir(r[0], r[1], r[2], idx) for r in lev] for lev in per])
-        out[f"{key}_uni_{n}"] = uni
-        if n >= 2:  # mismos receptores, emisor del otro extremo
-            right = np.array([[_at_dir(r[3], r[4], r[5], idx) for r in lev] for lev in per])
-            out[f"{key}_bi_{n}"] = 0.5 * (uni + right)
+                tof, amp = np.array([v[0] for v in fa]), np.array([v[1] for v in fa])
+                side = {}
+                for n, idx in subsets.items():
+                    idx = x.size - 1 - idx if mirror else idx  # los receptores simétricos, lejanos a este emisor
+                    side[n] = _at_dir(stacked_arrival(tr, t, off, idx, s, f0), tof, amp, off, idx)
+                sides.append(side)
+            for n in AT_NS:
+                out[f"{key}_uni_{n}"][li, r] = sides[0][n]
+                # Bidireccional: 2 emisores y 2n receptores; la media compensa la inclinación del hueso
+                out[f"{key}_bi_{n}"][li, r] = 0.5 * (sides[0][n] + sides[1][n])
     return out
 
 
@@ -876,6 +909,12 @@ def _get(aucs, body, group, key, level, stat):
     return g[key][level, stat] if key in g else None
 
 
+def _get_nan(aucs, body, group, key, level, stat) -> np.ndarray:
+    """Como :func:`_get`, pero (nan, nan, nan) si la configuración no existe (para las figuras)."""
+    v = _get(aucs, body, group, key, level, stat)
+    return np.full(3, np.nan) if v is None else v
+
+
 def tables(aucs: dict, psf: dict, gt: dict, bodies) -> str:
     """Tablas en Markdown (se copian al documento)."""
     L = []
@@ -899,16 +938,16 @@ def tables(aucs: dict, psf: dict, gt: dict, bodies) -> str:
                           ("contusion", "sub_global"))]
                 L.append(f"| {desc} | {ntx} | {nrx} | {ps[0] * 1e3:.2f} | {ps[1]:.0f} | {ps[2]:.1f} | "
                          + " | ".join(cells) + " |")
-        for snr in (40.0, 20.0, 0.0):
-            for lay in ("disp", "comp"):
-                L.append(f"\nAUC (superficial, caída), {'dispersa' if lay == 'disp' else 'compacta movida'}, "
-                         f"SNR {snr:g} dB, cuerpo {body}: filas N_tx, columnas N_rx\n")
-                L.append("| N_tx \\ N_rx | " + " | ".join(str(n) for n in NS) + " |")
-                L.append("|---" * (len(NS) + 1) + "|")
-                for ntx in NS:
-                    row = [_get(aucs, body, "superficial", f"hi/{lay}_{ntx}x{nrx}", lv[snr], hs["caida"])
-                           for nrx in NS]
-                    L.append(f"| {ntx} | " + " | ".join("—" if r is None else f"{r[0]:.2f}" for r in row) + " |")
+        for group, stat in (("desplazada", "escalon"), ("fisura", "escalon"), ("superficial", "caida")):
+            for snr in (40.0, 20.0, 0.0):
+                for lay in ("disp", "comp"):
+                    L.append(f"\nAUC ({group}, {stat}), {'dispersa' if lay == 'disp' else 'compacta movida'}, "
+                             f"SNR {snr:g} dB, cuerpo {body}: filas N_tx, columnas N_rx\n")
+                    L.append("| N_tx \\ N_rx | " + " | ".join(str(n) for n in NS) + " |")
+                    L.append("|---" * (len(NS) + 1) + "|")
+                    for ntx in NS:
+                        row = [_get(aucs, body, group, f"hi/{lay}_{ntx}x{nrx}", lv[snr], hs[stat]) for nrx in NS]
+                        L.append(f"| {ntx} | " + " | ".join("—" if r is None else f"{r[0]:.2f}" for r in row) + " |")
         L.append(f"\n### 3 MHz, cuerpo {body}: AUC por tipo de lesión (SNR 20 dB; mejor de las 4 estadísticas "
                  "indicado sólo como cota optimista)\n")
         L.append("| Configuración | " + " | ".join(f"{g} ({s})" for g in ("desplazada", "fisura", "intracortical",
@@ -925,7 +964,8 @@ def tables(aucs: dict, psf: dict, gt: dict, bodies) -> str:
         a = aucs[body]
         for snr in (40.0, 20.0):
             L.append(f"\n### Baja frecuencia, cuerpo {body}, SNR por canal {snr:g} dB "
-                     f"(AT: estadística 'lentitud' = pendiente tiempo-distancia, o tiempo de vuelo con 1 receptor; "
+                     f"(AT: estadística 'tiempo' = primer arribo de las señales apiladas, referido al receptor "
+                     f"más lejano; "
                      f"TT: 'tof' = adelanto o anomalía lateral del tiempo de vuelo)\n")
             L.append("| Técnica | N rx | Superficial | Interna | Contusión | Lejana |")
             L.append("|---|---|---|---|---|---|")
@@ -937,19 +977,29 @@ def tables(aucs: dict, psf: dict, gt: dict, bodies) -> str:
                             continue
                         cells = [_fmt(_get(aucs, body, g, key, llv[snr], 0)) for g in
                                  ("superficial", "interna", "contusion")]
-                        desc = "bidireccional" if mode == "bi" else "unidireccional"
-                        L.append(f"| AT {f / 1e6:g} MHz {desc} | {n} | " + " | ".join(cells) + " | — |")
+                        desc = "bidireccional (2 tx)" if mode == "bi" else "unidireccional (1 tx)"
+                        nrx = 2 * n if mode == "bi" else n
+                        L.append(f"| AT {f / 1e6:g} MHz {desc} | {nrx} | " + " | ".join(cells) + " | — |")
             for f in F_TT:
                 for n in TT_NS:
                     key = f"low/tt{f / 1e6:g}_{n}"
                     cells = [_fmt(_get(aucs, body, g, key, llv[snr], 0)) for g in
                              ("superficial", "interna", "contusion", "lejana")]
                     L.append(f"| TT {f / 1e6:g} MHz | {n} | " + " | ".join(cells) + " |")
-        L.append(f"\n### Baja frecuencia, cuerpo {body}, por lesión (SNR 40 dB; AT 'lentitud', TT 'tof')\n")
+        L.append(f"\n### AT, cuerpo {body}, fracturas superficiales, SNR 40 dB: AUC de cada estadística\n")
+        L.append("| Técnica | N rx | " + " | ".join(AT_STATS) + " |")
+        L.append("|---" * (2 + len(AT_STATS)) + "|")
+        for f in F_AT:
+            for n in AT_NS:
+                cells = [_fmt(_get(aucs, body, "superficial", f"low/at{f / 1e6:g}_uni_{n}", llv[40.0], si))
+                         for si in range(len(AT_STATS))]
+                L.append(f"| AT {f / 1e6:g} MHz unidireccional | {n} | " + " | ".join(cells) + " |")
+        L.append(f"\n### Baja frecuencia, cuerpo {body}, por lesión (SNR 40 dB; AT 'tiempo', TT 'tof')\n")
         L.append("| Técnica | desplazada | fisura | intracortical | estrés | contusión | lejana |")
         L.append("|---|---|---|---|---|---|---|")
-        for key, desc in (("low/at0.5_uni_1", "AT 0.5 MHz, 1 rx"), ("low/at0.5_bi_8", "AT 0.5 MHz bidir., 8 rx"),
-                          ("low/at1_uni_1", "AT 1 MHz, 1 rx"), ("low/at1_bi_8", "AT 1 MHz bidir., 8 rx"),
+        for key, desc in (("low/at0.5_uni_1", "AT 0.5 MHz, 1 tx + 1 rx"),
+                          ("low/at0.5_bi_4", "AT 0.5 MHz bidir., 2 tx + 8 rx"),
+                          ("low/at1_uni_1", "AT 1 MHz, 1 tx + 1 rx"), ("low/at1_bi_4", "AT 1 MHz bidir., 2 tx + 8 rx"),
                           ("low/tt0.5_1", "TT 0.5 MHz, 1 rx"), ("low/tt0.5_8", "TT 0.5 MHz, 8 rx")):
             cells = [_fmt(_get(aucs, body, g, key, llv[40.0], 0)) for g in
                      ("desplazada", "fisura", "intracortical", "estres", "contusion", "lejana")]
@@ -1022,8 +1072,8 @@ def figures(aucs: dict, psf: dict, bodies) -> None:
     for r, body in enumerate(bodies):
         for c, (lay, snr) in enumerate((("disp", 20.0), ("comp", 20.0), ("disp", 0.0), ("comp", 0.0))):
             ax = axs[r, c]
-            M = np.array([[(_get(aucs, body, "superficial", f"hi/{lay}_{a}x{b}", lv[snr], hs["caida"])
-                            or [np.nan])[0] for b in NS] for a in NS])
+            M = np.array([[_get_nan(aucs, body, "desplazada", f"hi/{lay}_{a}x{b}", lv[snr], hs["escalon"])[0]
+                           for b in NS] for a in NS])
             ax.imshow(M, vmin=0.5, vmax=1.0, cmap="viridis", origin="lower")
             for i in range(len(NS)):
                 for j in range(len(NS)):
@@ -1034,7 +1084,7 @@ def figures(aucs: dict, psf: dict, bodies) -> None:
             ax.set_xlabel("N_rx")
             ax.set_ylabel("N_tx")
             ax.set_title(f"{body}, {'dispersa' if lay == 'disp' else 'compacta movida'}, SNR {snr:g} dB", fontsize=9)
-    fig.suptitle("AUC de las fracturas superficiales (desplazada + fisura) con la caída del eco cortical", fontsize=10)
+    fig.suptitle("AUC de la fractura desplazada 1 mm con el escalón de la línea cortical", fontsize=10)
     fig.tight_layout()
     fig.savefig(img_dir / "estudio_auc_mapa.png", dpi=90)
     plt.close(fig)
@@ -1077,7 +1127,8 @@ def figures(aucs: dict, psf: dict, bodies) -> None:
                       for f, st in zip(F_AT, ("-o", "-s")) for m in ("uni", "bi")]
             series += [(f"TT {f / 1e6:g} MHz", [f"low/tt{f / 1e6:g}_{n}" for n in TT_NS], TT_NS, "--^") for f in F_TT]
             for k, (lab, keys, ns, st) in enumerate(series):
-                pts = [(n, _get(aucs, body, group, key, llv[40.0], 0)) for n, key in zip(ns, keys)]
+                mult = 2 if "bi" in lab else 1  # bidireccional: n receptores por emisor
+                pts = [(mult * n, _get(aucs, body, group, key, llv[40.0], 0)) for n, key in zip(ns, keys)]
                 pts = [(n, v) for n, v in pts if v is not None]
                 if not pts:
                     continue
@@ -1092,7 +1143,7 @@ def figures(aucs: dict, psf: dict, bodies) -> None:
             ax.set_ylabel("AUC")
             ax.set_title(f"{body}: {group}", fontsize=9)
     axs[0, 0].legend(fontsize=7)
-    fig.suptitle("Baja frecuencia (SNR 40 dB): AT = pendiente tiempo-distancia (1 receptor: tiempo de vuelo); "
+    fig.suptitle("Baja frecuencia (SNR 40 dB): AT = tiempo del primer arribo (señales apiladas); "
                  "TT = tiempo de vuelo (1 rx) o su anomalía lateral", fontsize=9)
     fig.tight_layout()
     fig.savefig(img_dir / "estudio_baja_frecuencia.png", dpi=90)
@@ -1107,7 +1158,7 @@ def figures(aucs: dict, psf: dict, bodies) -> None:
     snr_x = np.array([60.0 if np.isinf(s) else s for s in SNR_DB])
     for ax, (group, st) in zip(axs, panels):
         for k, key in enumerate(keys):
-            v = np.array([(_get(aucs, body, group, f"hi/{key}", li, hs[st]) or [np.nan] * 3) for li in range(4)])
+            v = np.array([_get_nan(aucs, body, group, f"hi/{key}", li, hs[st]) for li in range(4)])
             ax.plot(snr_x + 0.4 * (k - 5), v[:, 0], "-o", ms=3, lw=1, label=NAMED[key][0],
                     color=plt.cm.tab20(k / len(keys)))
         ax.axhline(0.5, color="k", lw=0.7)
