@@ -146,3 +146,19 @@ def test_longitudinal_surface_electrodes_and_current_density():
 
 def test_spectrum_low_frequency_band_uses_quasistatic_solver():
     assert spectrum.band_of(50e3).solver == "em.quasistatic"
+
+
+def test_reconstruct_difference_tolerates_cells_without_sensitivity():
+    """Una columna nula del jacobiano (celda aislada) no debe hacer singular la reconstrucción."""
+    from wavesim.em.quasistatic import Sensitivity, reconstruct_difference
+
+    rng = np.random.default_rng(0)
+    jac = rng.normal(size=(40, 6)) + 1j * rng.normal(size=(40, 6))
+    truth = np.array([0.0, 0.3, 0.0, -0.2, 0.0, 0.0])
+    jac[:, 5] = 0.0
+    sens = Sensitivity.__new__(Sensitivity)
+    sens.matrix = jac
+    out = reconstruct_difference(sens, jac @ truth, reg=1e-6)
+    assert np.all(np.isfinite(out))
+    assert out[5] == 0.0
+    assert np.allclose(out[:5], truth[:5], atol=1e-3)

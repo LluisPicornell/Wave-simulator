@@ -1,0 +1,25 @@
+--- mcmlgo.c	2026-11-11 08:52:51.782113018 +0000
++++ mcmlgo.c	2026-11-11 08:54:37.477237869 +0000
+@@ -88,7 +88,10 @@
+ #if STANDARDTEST /* Use fixed seed to test the program. */
+     idum = - 1;
+ #else
+-    idum = -(int)time(NULL)%(1<<15);
++    {	/* PARCHE: semilla reproducible desde MCML_SEED (el original usa time(NULL), que repite semilla en runs simultáneos). */
++      const char *es = getenv("MCML_SEED");
++      idum = es ? -(atoi(es)%(1<<15)) : -(int)time(NULL)%(1<<15);
++    }
+ 	  /* use 16-bit integer as the seed. */
+ #endif
+     ran3(&idum);
+--- mcmlio.c	2026-11-11 08:52:51.782113018 +0000
++++ mcmlio.c	2026-11-11 08:53:37.122550653 +0000
+@@ -188,7 +188,7 @@
+  ****/
+ char * FindDataLine(FILE *File_Ptr)
+ {
+-  char buf[STRLEN];
++  static char buf[STRLEN];
+ 
+   buf[0] = '\0';
+   do {	/* skip space or comment lines. */

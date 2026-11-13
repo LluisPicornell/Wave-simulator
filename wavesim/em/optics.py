@@ -47,6 +47,7 @@ class DiffusionResult:
     residual: float
     floor: float  # por debajo de este valor la fluencia no es numéricamente fiable
     transmission_floor: float  # lo mismo para la exitancia transmitida
+    reflected_profile: np.ndarray | None = None  # exitancia por la cara superior de cada columna (NaN sin tejido)
 
     @property
     def transmission(self) -> float:
@@ -109,18 +110,20 @@ def _face_diffusion(D: np.ndarray, tissue: np.ndarray, axis: int, dx: float, A: 
 
 
 def solve_diffusion(phantom: Phantom, wavelength_nm: float, source: str | tuple[float, float] = "top",
-                    tol: float = 1e-13, max_iter: int = 50_000) -> DiffusionResult:
+                    tol: float = 1e-13, max_iter: int = 50_000, n_tissue: float = N_TISSUE) -> DiffusionResult:
     """Fluencia de luz en el fantoma para iluminación desde arriba (``"top"``) o una fibra en ``(x, z)``.
 
     El exterior (agua o aire) se toma del fondo del fantoma para calcular el
     contorno extrapolado. Lanza ``ValueError`` si la fibra no está dentro del tejido.
+    ``n_tissue`` es el índice del tejido en ese contorno (1.4 por defecto; con ``n_tissue`` igual al del fondo
+    no hay reflexión interna y ``A = 1``, el caso de las comparaciones con códigos de transporte de índice ajustado).
     """
     g = phantom.grid
     dx2 = g.dx**2
     mua, mus = optical_maps(phantom, wavelength_nm)
     tissue = ~np.isin(phantom.labels, [TISSUE_INDEX[k] for k in NON_TISSUE])
     D = np.where(tissue, 1.0 / (3.0 * (mua + mus + 1e-12)), 0.0)
-    A = boundary_parameter(_outer_index(phantom))
+    A = boundary_parameter(_outer_index(phantom), n_tissue)
     fx = _face_diffusion(D, tissue, 1, g.dx, A) / dx2
     fz = _face_diffusion(D, tissue, 0, g.dx, A) / dx2
     diag = mua.copy()
@@ -195,7 +198,12 @@ def solve_diffusion(phantom: Phantom, wavelength_nm: float, source: str | tuple[
     gain = d_last / (g.dx / 2 + 2 * A * d_last)
     prof = np.where(has, phi[last, cols] * gain, np.nan)
     exit_floor = floor * (float(np.max(gain[has])) if has.any() else 1.0)
-    return DiffusionResult(wavelength_nm, phi, mua, mus, prof, it, float(res), floor, exit_floor)
+    # Misma fórmula en la cara de entrada (primera celda de tejido de cada columna): es la reflectancia difusa
+    # resuelta en x, lo que se compara con los códigos de transporte.
+    first = np.argmax(tissue, axis=0)
+    d_first = D[first, cols]
+    refl = np.where(has, phi[first, cols] * d_first / (g.dx / 2 + 2 * A * d_first), np.nan)
+    return DiffusionResult(wavelength_nm, phi, mua, mus, prof, it, float(res), floor, exit_floor, refl)
 
 
 def ballistic_transmission(phantom: Phantom, wavelength_nm: float, x: float = 0.0) -> float:

@@ -614,4 +614,9 @@ def reconstruct_difference(sens: Sensitivity, delta_v: np.ndarray, reg: float = 
     jac = np.vstack([sens.matrix.real, sens.matrix.imag])
     data = np.concatenate([np.real(delta_v), np.imag(delta_v)])
     hess = jac.T @ jac
-    return np.linalg.solve(hess + reg * np.diag(np.diag(hess)), jac.T @ data)
+    # Una celda sin sensibilidad (p. ej. aislada del resto por la escalera del borde) tiene
+    # fila, columna y diagonal nulas: sin un suelo el sistema es singular y la imagen explota.
+    # Con él, su cambio reconstruido es 0 y el resto de celdas no se altera.
+    diag = np.diag(hess)
+    diag = np.maximum(diag, 1e-12 * diag.max())
+    return np.linalg.solve(hess + reg * np.diag(diag), jac.T @ data)
