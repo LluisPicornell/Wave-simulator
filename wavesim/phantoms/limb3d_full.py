@@ -61,8 +61,9 @@ _MED_EDEMA_IDX = np.array([_T[t] for t in (*MEDULLARY_TISSUES, "edema")], dtype=
 class Metaphysis:
     """Ensanchamiento metafisario de un hueso a lo largo de x (como el preset 2D ``tibia_metafisis``).
 
-    El hueso pasa de la diáfisis a la metáfisis con una transición suave
-    ``0.5·(1 + tanh(direction·(x − position) / (transition/2)))``: el radio
+    El hueso pasa de la diáfisis a la metáfisis con una transición suave de
+    longitud ``transition`` centrada en ``position`` (polinomio ``3t² − 2t³``,
+    de derivada continua y que vale exactamente 0 y 1 fuera de ella): el radio
     exterior se multiplica por ``flare``, la cortical pasa a ``cortex`` y el
     endostio se tapiza de hueso trabecular de grosor ``trabecular`` (en la
     metáfisis real la cavidad está llena de trabéculas con algo de médula en
@@ -72,14 +73,15 @@ class Metaphysis:
 
     position: float = 0.0
     direction: int = 1
-    transition: float = 10e-3
+    transition: float = 20e-3
     flare: float = 1.68
     cortex: float = 1.5e-3
     trabecular: float = 13e-3
     bone_index: int = 0
 
     def weight(self, x):
-        return 0.5 * (1.0 + np.tanh(self.direction * (np.asarray(x) - self.position) / (0.5 * self.transition)))
+        t = np.clip(0.5 + self.direction * (np.asarray(x) - self.position) / self.transition, 0.0, 1.0)
+        return t * t * (3.0 - 2.0 * t)
 
 
 @dataclass
