@@ -13,6 +13,7 @@ Imprime las tablas de ``docs/validacion/rayos_x3d.md``. Secciones (``--only``):
   poly      radiografía policromática de losas frente a Beer-Lambert integrado en energía;
   crack     visibilidad de una grieta plana frente al ángulo entre el haz y su plano;
   fdk       FDK frente al ángulo de cono sobre un fantoma de elipsoides tipo Shepp-Logan 3D y una esfera;
+  sart      OS-SART 3D con TV frente a FDK con pocas vistas y ruido;
   scatter   Monte Carlo 3D: balance, primaria frente a Beer-Lambert, losa frente al MC 2D y SPR de la pierna;
   leg       pierna 3D: radiografías AP y lateral y TAC de haz cónico (tiempo, memoria y figura).
 """
@@ -332,6 +333,39 @@ def fdk_study() -> None:
             print(f"| cónico, sid {int(sid*1e3)} | {mode} | {v[0]:.3f} | {v[1]:.3f} | {v[2]:.3f} |", flush=True)
 
 
+def sart_study() -> None:
+    sec("OS-SART 3D (con TV) frente a FDK: pocas vistas y ruido (Shepp-Logan 3D, 48³, dx = 1.3 mm, cono sid 400 mm)")
+    n = 48
+    g = Grid3D(n, n, n, 1.3e-3)
+    gf = Grid3D(2 * n, 2 * n, 2 * n, 0.65e-3, g.x0 - 0.325e-3, g.y0 - 0.325e-3, g.z0 - 0.325e-3)
+    truth, ell = x3.shepp_logan_3d(g, mu=50.0)
+    fine, _ = x3.shepp_logan_3d(gf, mu=50.0)
+    zz, yy, xx = np.meshgrid(g.z - g.z.mean(), g.y - g.y.mean(), g.x - g.x.mean(), indexing="ij")
+    ctr, sa = np.array(ell[1].center), np.array(ell[1].semi_axes) - 2.5e-3  # interior del cráneo
+    sup = ((xx - ctr[0]) / sa[0]) ** 2 + ((yy - ctr[1]) / sa[1]) ** 2 + ((zz - ctr[2]) / sa[2]) ** 2 < 1
+    geo = x3.Geometry3D.covering(g, 0.4, 0.56)
+    rng = np.random.default_rng(0)
+
+    def run(name, sino, ang):
+        if name == "FDK":
+            return x3.fdk(sino, ang, geo, g)
+        return x3.os_sart3d(sino, ang, geo, g, n_iter=4, subset_size=6, tv_weight=0.003 if "TV" in name else 0.0)
+
+    print("| vistas | fotones/px | método | error rms relativo (interior) | t (s) |")
+    print("|---|---|---|---|---|")
+    for nv, n0 in ((120, None), (36, None), (36, 300.0)):
+        ang = np.arange(nv) * 360.0 / nv
+        sino = x3.project(fine, gf, geo, ang)
+        if n0 is not None:  # ruido de Poisson monoenergético
+            sino = -np.log(np.maximum(rng.poisson(n0 * np.exp(-sino)), 1) / n0)
+        for name in ("FDK", "OS-SART (4 it)", "OS-SART + TV (4 it)"):
+            t = time.time()
+            rec = run(name, sino, ang)
+            err = np.sqrt(((rec - truth)[sup] ** 2).mean()) / 50.0
+            print(f"| {nv} | {'sin ruido' if n0 is None else int(n0)} | {name} | {err:.3f} | {time.time()-t:.1f} |",
+                  flush=True)
+
+
 # --------------------------------------------------------------------------------------
 def scatter_study() -> None:
     sec("Monte Carlo 3D de scatter")
@@ -432,28 +466,26 @@ def leg_study(figure: str | None) -> None:
     truth = ct.property_map(lambda k: float(xd.linear_attenuation(k, res.projections.spectrum.mean_energy)),
                             dtype=np.float64)
     hu_true = xd.hounsfield(truth, mu_w, 0.0)
-    cz, cy = ct.meta["axis_depth"], 0.0
-    k, j, i = ct.grid.index_of(0.0, cy, cz)
-    for name, mask in (("agua (fondo)", ct.mask("water")), ("músculo", ct.mask("muscle")),
+    def erode(m, k=2):
+        """Erosión en el plano (y, z): descarta las celdas a menos de k celdas de otro tejido (volumen parcial)."""
+        out = m.copy()
+        for dz in range(-k, k + 1):
+            for dy in range(-k, k + 1):
+                out &= np.roll(np.roll(m, dz, axis=0), dy, axis=1)
+        return out
+
+    away = np.abs(ct.grid.x) > 8e-3  # fuera de la zona de la fractura y sus bandas
+    away[:12] = away[-12:] = False
+    for name, mask in (("agua (fondo)", ct.mask("water")), ("músculo (anillo de 2 mm)", ct.mask("muscle")),
                        ("grasa", ct.mask("fat")), ("cortical", ct.mask("cortical_bone"))):
-        m = mask.copy()
-        m[:, :, :20] = m[:, :, -20:] = False  # lejos de los extremos del dominio
-        m[:, :, 44:84] = False if name == "cortical" else m[:, :, 44:84]
-        if name != "cortical":
-            m = m & (np.abs(ct.grid.x)[None, None, :] > 8e-3)
-            from_edge = np.zeros_like(m)
-            from_edge[8:-8, 8:-8, :] = True
-            m &= from_edge
-        else:
-            m &= (np.abs(ct.grid.x)[None, None, :] > 6e-3)
+        m = erode(mask, 1 if "músculo" in name else 2) & away[None, None, :]
         print(f"  {name}: HU medio {res.hu[m].mean():8.1f} (modelo {hu_true[m].mean():8.1f}), "
               f"σ = {res.hu[m].std():6.1f} HU, n = {int(m.sum())}")
     print(f"TAC cónico 128³ ({n_ang} vistas, panel {geo.n_u}×{geo.n_v}, sid {geo.sid} m, sdd {geo.sdd} m, 120 kVp): "
           f"{t_ct:.0f} s con 1 hilo, memoria máxima {mem:.0f} MB")
     t = time.time()
     st = x3.fdk(res.projections.line_integrals, np.arange(n_ang) * 360.0 / n_ang, geo, ct.grid, mode="stack")
-    print(f"(para comparar) apilado de abanico sobre las mismas proyecciones: {time.time()-t:.1f} s; "
-          f"FDK sin linealizar no aplica")
+    print(f"(para comparar) apilado de abanico sobre las mismas proyecciones: {time.time()-t:.1f} s")
     del st
     if figure:
         import matplotlib
@@ -469,11 +501,15 @@ def leg_study(figure: str | None) -> None:
             a.set_title(ttl + " (60 kVp, con ruido)")
             a.set_xlabel("u (mm, en el detector)")
             a.set_ylabel("v = x (mm)")
-        r = rs
-        ext = [r.geometry.u[0] * 1e3, r.geometry.u[-1] * 1e3, r.geometry.v[-1] * 1e3, r.geometry.v[0] * 1e3]
-        axs[0, 2].imshow(rs.line_integrals[0], cmap="gray_r", extent=ext)
-        axs[0, 2].set_title("AP con scatter Monte Carlo\n(menor contraste)")
-        axs[0, 2].set_xlabel("u (mm)")
+        li_p, li_s = -np.log(rs.primary[0]), -np.log(rs.primary[0] + rs.scatter[0])
+        col = int(np.argmax(li_p.mean(axis=0)))
+        vv = rs.geometry.v * 1e3
+        axs[0, 2].plot(vv, li_p[:, col], label="primaria")
+        axs[0, 2].plot(vv, li_s[:, col], label="primaria + scatter (Monte Carlo)")
+        axs[0, 2].set_title("Perfil AP a lo largo del hueso: el scatter\nreduce el contraste de la fractura")
+        axs[0, 2].set_xlabel("v = x (mm)")
+        axs[0, 2].set_ylabel("-ln(I/I0)")
+        axs[0, 2].legend(fontsize=8)
         gx = ct.grid
         ext_yz = [gx.y[0] * 1e3, gx.y[-1] * 1e3, gx.z[-1] * 1e3, gx.z[0] * 1e3]
         ext_xz = [gx.x[0] * 1e3, gx.x[-1] * 1e3, gx.z[-1] * 1e3, gx.z[0] * 1e3]
@@ -500,7 +536,7 @@ def main():
     ap.add_argument("--only", nargs="*", default=None)
     ap.add_argument("--figure", default="docs/img/rayos_x3d.png")
     args = ap.parse_args()
-    todo = args.only or ["chords", "adjoint", "extruded", "poly", "crack", "fdk", "scatter", "leg"]
+    todo = args.only or ["chords", "adjoint", "extruded", "poly", "crack", "fdk", "sart", "scatter", "leg"]
     t0 = time.time()
     if "chords" in todo:
         chords()
@@ -514,6 +550,8 @@ def main():
         crack()
     if "fdk" in todo:
         fdk_study()
+    if "sart" in todo:
+        sart_study()
     if "scatter" in todo:
         scatter_study()
     if "leg" in todo:

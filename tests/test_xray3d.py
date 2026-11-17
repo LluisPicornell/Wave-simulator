@@ -273,3 +273,24 @@ def test_pierna_3d_radiografia_ap_lateral_y_geometria():
         x3.Geometry3D(1.0, 0.5, 4, 4, 1e-3, 1e-3)
     with pytest.raises(ValueError):
         x3.project(np.zeros((2, 2, 2)), Grid3D(3, 3, 3, 1e-3), x3.Geometry3D(1.0, 1.2, 4, 4, 1e-3, 1e-3), [0.0])
+
+
+def test_os_sart3d_reconstruye_una_esfera_y_el_tv_ayuda_con_ruido():
+    n = 20
+    g = Grid3D(n, n, n, 2.2e-3)
+    sph = x3.ellipsoid_volume(g, [x3.Ellipsoid((0, 0, 0), (0.016, 0.016, 0.016), 40.0)], 2)
+    geo = x3.Geometry3D.covering(g, 0.4, 0.55)
+    ang = np.arange(24) * 15.0
+    s = x3.project(sph, g, geo, ang)
+    rec = x3.os_sart3d(s, ang, geo, g, n_iter=4, subset_size=6)
+    zz, yy, xx = np.meshgrid(g.z - g.z.mean(), g.y - g.y.mean(), g.x - g.x.mean(), indexing="ij")
+    inside = np.sqrt(xx**2 + yy**2 + zz**2) < 0.012
+    assert np.sqrt(((rec - sph)[inside] ** 2).mean()) / 40.0 < 0.05
+    assert rec.min() >= 0.0  # no negatividad
+    # con ruido de Poisson fuerte, la TV reduce el error respecto a no regularizar
+    rng = np.random.default_rng(1)
+    noisy = -np.log(np.maximum(rng.poisson(200.0 * np.exp(-s)), 1) / 200.0)
+    e0 = np.sqrt(((x3.os_sart3d(noisy, ang, geo, g, n_iter=6, subset_size=6) - sph)[inside] ** 2).mean())
+    e1 = np.sqrt(((x3.os_sart3d(noisy, ang, geo, g, n_iter=6, subset_size=6, tv_weight=0.003) - sph)[inside] ** 2)
+                 .mean())
+    assert e1 < e0
