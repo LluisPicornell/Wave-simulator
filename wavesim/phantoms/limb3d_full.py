@@ -161,6 +161,15 @@ class Fracture3D:
       grieta está en la cortical lejana, en el lado opuesto.
     - ``arc_center_deg``: dirección del lado "cercano" alrededor del eje del
       hueso (0 = hacia la sonda, -z; positivo hacia +y).
+    - ``spiral_pitch``: distinto de 0, la grieta no es un plano sino una
+      **hélice** que atraviesa la cortical (fractura espiroidea, la
+      "longitudinal/espiroidea" del corte transversal 2D, ``RingFracture``):
+      parte de la dirección ``arc_center_deg`` en x = ``position`` y gira una
+      vuelta cada ``spiral_pitch`` metros (el signo da el sentido; ``inf`` =
+      grieta longitudinal recta), a lo largo de ``crack_length``. ``span`` es
+      entonces el tramo de la cortical en fracción de su grosor desde el
+      periostio, como en ``RingFracture``. El hematoma sigue la línea de la
+      grieta en el periostio. No admite desplazamiento.
     """
 
     kind: str = "transversal"
@@ -188,6 +197,8 @@ class Fracture3D:
     arc_deg: float = 360.0
     arc_center_deg: float = 0.0
     displacement_y: float = 0.0
+    spiral_pitch: float = 0.0
+    crack_length: float = 30e-3
 
     @classmethod
     def from_2d(cls, fracture: Fracture, **extra) -> "Fracture3D":
@@ -242,12 +253,13 @@ def random_limb_3d_spec(rng: np.random.Generator, preset: str = "pierna",
                    rotation_deg=float(rng.normal(0, 5)), body=b.name)
 
 
-#: Tipos de fractura 3D: los mismos que en 2D (``limb.FRACTURE_KINDS``).
-FRACTURE_KINDS_3D = FRACTURE_KINDS
+#: Tipos de fractura 3D: los del corte longitudinal 2D (``limb.FRACTURE_KINDS``) más la espiroidea (la
+#: "longitudinal/espiroidea" del corte transversal 2D).
+FRACTURE_KINDS_3D = FRACTURE_KINDS + ("espiroidea",)
 
 
 def random_fracture_3d(rng: np.random.Generator, kind: str | None = None, x_range: float = 8e-3,
-                       kinds: Sequence[str] = FRACTURE_KINDS, bone_index: int = 0) -> Fracture3D:
+                       kinds: Sequence[str] = FRACTURE_KINDS_3D, bone_index: int = 0) -> Fracture3D:
     """Fractura 3D aleatoria: ``random_fracture`` (mismos rangos y tipos) más lo propio del 3D.
 
     - fisura: grosor mínimo de una celda (``min_gap_cells = 1``; si no, una
@@ -255,7 +267,19 @@ def random_fracture_3d(rng: np.random.Generator, kind: str | None = None, x_rang
       60-180° alrededor de la cara de la sonda (σ = 20°).
     - intracortical y estrés: arco de 60-180°; cortical lejana: 90-240°.
     - desplazada: además un desplazamiento lateral (σ = 0.5 mm).
+    - espiroidea: hélice de paso ±40-150 mm (o recta, longitudinal, el 20 %
+      de las veces) y 20-50 mm de longitud, con los rangos de grosor,
+      rugosidad y hematoma de ``random_ring_fracture``.
     """
+    if kind == "espiroidea" or (kind is None and "espiroidea" in kinds and rng.random() < 1.0 / len(kinds)):
+        u = rng.uniform
+        pitch = np.inf if rng.random() < 0.2 else float(rng.choice([-1, 1]) * u(40e-3, 150e-3))
+        return Fracture3D(kind="espiroidea", position=float(u(-x_range, x_range)), gap=float(u(0.25e-3, 0.8e-3)),
+                          roughness=float(u(0.03e-3, 0.15e-3)), hematoma_thickness=float(u(0.5e-3, 2e-3)),
+                          hematoma_length=float(u(5e-3, 12e-3)), edema_length=float(u(6e-3, 20e-3)),
+                          arc_center_deg=float(u(-45, 45)), spiral_pitch=pitch, crack_length=float(u(20e-3, 50e-3)),
+                          bone_index=bone_index)
+    kinds = tuple(k for k in kinds if k != "espiroidea")
     fr = random_fracture(rng, kind, x_range, kinds)
     extra: dict = {"bone_index": bone_index}
     if fr.kind in ("fisura", "intracortical", "estres"):
@@ -384,10 +408,14 @@ class _Geometry:
         self.crack_center = (xc, cy, cz)
         self.crack_theta = np.radians(fr.angle_deg)
         crack_len = 4.0 * ro + 10e-3  # como en 2D: 2·(grosor del hueso) + 10 mm
+        if fr.spiral_pitch != 0:
+            crack_len = max(crack_len, fr.crack_length + 10e-3)
         self.crack = RoughSurface(crack_len, crack_len, fr.roughness, max(fr.gap, 0.3e-3), _stream(seed, "fracture"),
                                   a0=-0.5 * crack_len, b0=-0.5 * crack_len)
         self.shift = (fr.displacement_y, fr.displacement)
         self.displaced = fr.displacement != 0.0 or fr.displacement_y != 0.0
+        if self.displaced and fr.spiral_pitch != 0:
+            raise ValueError("La fractura espiroidea (spiral_pitch != 0) no admite desplazamiento")
 
     def crack_distance(self, X, Y, Z, x_offset: float = 0.0, angle_deg: float | None = None):
         """Distancia con signo a la superficie de fractura (> 0: fragmento distal, hacia +x)."""
@@ -556,6 +584,8 @@ def _fracture_box(g: _Geometry, grid: Grid3D):
     ro = float(g.profile(i, xc)[0])
     reach = [fr.hematoma_length / 2, fr.edema_length / 2, fr.reaction_length / 2 + 2e-3,
              abs(np.tan(g.crack_theta)) * 2 * ro + fr.gap]
+    if fr.spiral_pitch != 0:
+        reach.append(fr.crack_length / 2 + fr.hematoma_thickness)
     reach += [abs(off) + abs(np.tan(np.radians(a))) * 2 * ro + fr.gap for off, a in fr.extra_cracks]
     hx = max(reach) + fr.microcrack_length + 2e-3
     xs_all = grid.x
@@ -602,6 +632,13 @@ def _apply_fracture(g: _Geometry, grid: Grid3D, labels: np.ndarray, masks: dict,
     def arc_ok(th):
         return np.abs(_wrap(th - th_focus)) <= 0.5 * np.radians(fr.arc_deg) + 1e-9
 
+    helical = fr.spiral_pitch != 0
+    if helical:
+        # ángulo de cada punto respecto a la línea de la hélice en su x
+        twist = 0.0 if np.isinf(fr.spiral_pitch) else 2 * np.pi / fr.spiral_pitch
+        d_helix = _wrap(fh["th"] - th_focus - twist * (X - xc))
+        along_helix = np.abs(X - xc) <= 0.5 * fr.crack_length
+
     # Profundidad de la grieta (``depth_fraction`` o ``span``) desde el lado cercano
     if fr.span is None:
         proj_h = fh["dy"] * ref[0] + fh["dz"] * ref[1]
@@ -617,10 +654,17 @@ def _apply_fracture(g: _Geometry, grid: Grid3D, labels: np.ndarray, masks: dict,
     crack = np.zeros(out.shape, dtype=bool)
     if fr.gap > 0:
         half_gap = 0.5 * max(fr.gap, fr.min_gap_cells * grid.dx)
-        sel = bone_any & depth_ok & arc_ok(f["th"])
-        crack = (np.abs(dist) <= half_gap) & sel
-        for off, ang in fr.extra_cracks:
-            crack |= (np.abs(g.crack_distance(X, Y, Z, off, ang)) <= half_gap) & sel
+        if helical:
+            sel = cort_h & along_helix
+            if fr.span is not None:
+                u = (fh["ro"] - fh["r"]) / np.maximum(fh["ro"] - fh["ri"], 1e-9)
+                sel &= (u >= fr.span[0]) & (u <= fr.span[1])
+            crack = (np.abs(fh["r"] * d_helix - g.crack(X - xc, fh["r"] - Ro)) <= half_gap) & sel
+        else:
+            sel = bone_any & depth_ok & arc_ok(f["th"])
+            crack = (np.abs(dist) <= half_gap) & sel
+            for off, ang in fr.extra_cracks:
+                crack |= (np.abs(g.crack_distance(X, Y, Z, off, ang)) <= half_gap) & sel
 
     # Edema de médula (antes de abrir la grieta)
     ex = (1.0, 0.0, 0.0)
@@ -676,13 +720,20 @@ def _apply_fracture(g: _Geometry, grid: Grid3D, labels: np.ndarray, masks: dict,
     if fr.gap > 0 and fr.hematoma_thickness > 0 and fr.hematoma_length > 0:
         d_ref = _wrap(fh["th"] - a_ref)
         near_half = np.cos(d_ref) > 0
-        if fr.span is None:
+        if helical:
+            reaches = along_helix & (fr.span is None or fr.span[0] <= 0)
+        elif fr.span is None:
             away = -(fr.displacement_y * ref[0] + fr.displacement * ref[1])
             reaches = Ro * (1.0 - np.cos(d_ref)) <= fr.depth_fraction * 2 * Ro + max(away, 0.0) + 1e-12
         else:
             reaches = (near_half & (fr.span[0] <= 0)) | (~near_half & (fr.span[1] >= 3))
-        sleeve = ((X - xc) / (fr.hematoma_length / 2)) ** 2 + ((fh["r"] - Ro) / fr.hematoma_thickness) ** 2 <= 1.0
-        hem = sleeve & reaches & arc_ok(fh["th"]) & np.isin(out, _SOFT_IDX)
+        radial = ((fh["r"] - Ro) / fr.hematoma_thickness) ** 2
+        if helical:
+            # a lo largo de la línea de la grieta, con anchura ``hematoma_length`` (como en ``RingFracture``)
+            sleeve = radial + (Ro * d_helix / (fr.hematoma_length / 2)) ** 2 <= 1.0
+        else:
+            sleeve = (((X - xc) / (fr.hematoma_length / 2)) ** 2 + radial <= 1.0) & arc_ok(fh["th"])
+        hem = sleeve & reaches & np.isin(out, _SOFT_IDX)
         out[hem] = _T["hematoma"]
         box_masks["hematoma"] |= hem
 

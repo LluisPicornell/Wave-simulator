@@ -305,3 +305,21 @@ def test_solver_elastico_3d_corre_sobre_limb_3d():
     s.add_source(Source3D(np.array([k]), np.array([j]), np.array([i]), np.array([0]), pulse))
     s.run(nt)
     assert np.isfinite(s.vx).all() and np.isfinite(s.pressure()).all() and np.abs(s.vz).max() > 0
+
+
+def test_espiroidea_gira_alrededor_del_hueso():
+    dx = 0.5e-3
+    fr = Fracture3D(kind="espiroidea", position=0.0, gap=0.8e-3, roughness=0.0, spiral_pitch=40e-3,
+                    crack_length=20e-3, edema_length=0.0)
+    ph = limb_3d("pierna", fr, length=24e-3, dx=dx, roughness=False)
+    g = ph.grid
+    yc, zc = ph.meta["bone_centers"][0]
+    angles = []
+    for x in (-5e-3, 0.0, 5e-3):
+        k, j = np.nonzero(ph.masks["fracture"][:, :, g.index_of(x, 0, 0)[2]])
+        angles.append(np.degrees(np.arctan2((g.y0 + j * dx - yc).mean(), -(g.z0 + k * dx - zc).mean())))
+    # 5 mm de 40 mm por vuelta = 45°
+    assert np.diff(angles) == pytest.approx([45.0, 45.0], abs=8.0)
+    assert not ph.masks["fracture"][:, :, np.abs(g.x) > 10.5e-3].any()
+    with pytest.raises(ValueError):
+        limb_3d("pierna", replace(fr, displacement=1e-3), length=4e-3, dx=1e-3)
