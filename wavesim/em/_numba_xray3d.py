@@ -127,12 +127,13 @@ def adjoint(vals, org, dirs, acc, nx, ny, nz):
 
 
 @njit(parallel=True, cache=True)
-def backproject_fdk(q, vol, x0, y0, z0, dx, c, d, u, v, sid, sdd, du, dv, cone, weight):
+def backproject_fdk(q, vol, x0, y0, z0, dx, c, d, u, v, sid, sdd, du, dv, cone, weight, vmag_fixed):
     """Suma en ``vol (nz, ny, nx)`` la retroproyección de la vista ``q (n_v, n_u)`` ya filtrada.
 
     ``c``: isocentro (x, y, z) en metros; ``d``, ``u``, ``v``: rayo central y ejes del detector (x, y, z).
     Cono: el vóxel a profundidad ``r`` (a lo largo de ``d``) se proyecta en ``(u, v)·sdd/(sid + r)`` y pesa
-    ``(sid/(sid + r))²``. Haz paralelo (``cone = False``): proyección ortogonal, peso 1.
+    ``(sid/(sid + r))²``. Haz paralelo (``cone = False``): proyección ortogonal, peso 1. ``vmag_fixed`` > 0
+    fija la magnificación en v (apilado de cortes de abanico: la fila no depende de la profundidad).
     """
     nz, ny, nx = vol.shape
     nv, nu = q.shape
@@ -155,7 +156,7 @@ def backproject_fdk(q, vol, x0, y0, z0, dx, c, d, u, v, sid, sdd, du, dv, cone, 
                     mag = 1.0
                     f = 1.0
                 fu = t * mag / du + 0.5 * (nu - 1)
-                fv = w * mag / dv + 0.5 * (nv - 1)
+                fv = w * (vmag_fixed if vmag_fixed > 0.0 else mag) / dv + 0.5 * (nv - 1)
                 iu = int(np.floor(fu))
                 iv = int(np.floor(fv))
                 if iu < 0 or iu >= nu - 1 or iv < 0 or iv >= nv - 1:
@@ -164,3 +165,214 @@ def backproject_fdk(q, vol, x0, y0, z0, dx, c, d, u, v, sid, sdd, du, dv, cone, 
                 val = ((1 - av) * ((1 - au) * q[iv, iu] + au * q[iv, iu + 1])
                        + av * ((1 - au) * q[iv + 1, iu] + au * q[iv + 1, iu + 1]))
                 vol[k, j, i] += weight * f * val
+
+
+# --------------------------------------------------------------------------------------
+# Monte Carlo de fotones en 3D (scatter): generalización de ``_numba_xray.run_photons``
+# --------------------------------------------------------------------------------------
+from ._numba_xray import HC, MEC2, _interp_uniform, _rotate  # noqa: E402
+
+# Contadores en ``acc``: 0 N emitidos, 1 peso de señal emitido, 2 n fotoeléctrico, 3 n bajo el corte de energía,
+# 4 n fuera del detector, 5 n colisiones reales, 6 n virtuales, 7 n Compton, 8 n Rayleigh
+NACC3 = 9
+
+
+@njit(cache=True)
+def _exit3(x, y, z, ux, uy, uz, b):
+    """Parámetro ``t`` al que la trayectoria sale de la caja ``b = (x0, x1, y0, y1, z0, z1)``."""
+    t = 1e300
+    if ux > 1e-14:
+        t = min(t, (b[1] - x) / ux)
+    elif ux < -1e-14:
+        t = min(t, (b[0] - x) / ux)
+    if uy > 1e-14:
+        t = min(t, (b[3] - y) / uy)
+    elif uy < -1e-14:
+        t = min(t, (b[2] - y) / uy)
+    if uz > 1e-14:
+        t = min(t, (b[5] - z) / uz)
+    elif uz < -1e-14:
+        t = min(t, (b[4] - z) / uz)
+    return t
+
+
+@njit(cache=True)
+def run_photons3d(seed, nphot, mat, grid_f, e0, mu_pe, mu_coh, mu_inc, mu_max, x_step, s_over_z, ray_e0, ray_de,
+                  ray_cdf, spec_e, spec_cdf, det_w, gv, prim_n, scat_n, prim_w, scat_w, acc):
+    """Lanza ``nphot`` fotones de una vista y acumula en los mapas de bins ``(nbv, nbu)``.
+
+    ``grid_f = (x0, y0, z0, dx)``; ``mat (nz, ny, nx)``; ``det_w``: peso de señal por energía (rejilla de 1 keV
+    desde ``e0``). ``gv`` (geometría de la vista): 0-2 isocentro, 3-5 rayo central ``d``, 6-8 eje ``u``, 9-11
+    eje ``v``, 12 ``sid``, 13 ``sdd``, 14-15 semianchuras del detector en u y v, 16-17 número de bins (u, v),
+    18 radio del cilindro circunscrito (haz paralelo), 19 = 1 si es haz paralelo.
+    """
+    np.random.seed(seed)
+    nz, ny, nx = mat.shape
+    x0, y0, z0, dx = grid_f[0], grid_f[1], grid_f[2], grid_f[3]
+    box = np.array([x0 - 0.5 * dx, x0 + (nx - 0.5) * dx, y0 - 0.5 * dx, y0 + (ny - 0.5) * dx, z0 - 0.5 * dx,
+                    z0 + (nz - 0.5) * dx])
+    cx, cy, cz = gv[0], gv[1], gv[2]
+    dxr, dyr, dzr = gv[3], gv[4], gv[5]
+    uxr, uyr, uzr = gv[6], gv[7], gv[8]
+    vxr, vyr, vzr = gv[9], gv[10], gv[11]
+    sid, sdd, half_u, half_v = gv[12], gv[13], gv[14], gv[15]
+    nbu, nbv = int(gv[16]), int(gv[17])
+    rad = gv[18]
+    parallel = gv[19] > 0.5
+    bw_u, bw_v = 2.0 * half_u / nbu, 2.0 * half_v / nbv
+    sx, sy, sz = cx - sid * dxr, cy - sid * dyr, cz - sid * dzr
+    # centro del detector (cono) o plano de detección (paralelo)
+    if parallel:
+        pcx, pcy, pcz = cx + rad * dxr, cy + rad * dyr, cz + rad * dzr
+    else:
+        pcx, pcy, pcz = cx + (sdd - sid) * dxr, cy + (sdd - sid) * dyr, cz + (sdd - sid) * dzr
+    e_min = e0
+    nspec = spec_e.shape[0]
+    nre = ray_cdf.shape[1]
+    ncos = ray_cdf.shape[2]
+    for _ in range(nphot):
+        r = np.random.random()
+        k = np.searchsorted(spec_cdf, r)
+        if k >= nspec:
+            k = nspec - 1
+        en = spec_e[k]
+        acc[0] += 1.0
+        acc[1] += _interp_uniform(det_w, en - e0)
+        ue = (2.0 * np.random.random() - 1.0) * half_u
+        ve = (2.0 * np.random.random() - 1.0) * half_v
+        if parallel:
+            x = cx + ue * uxr + ve * vxr - rad * dxr
+            y = cy + ue * uyr + ve * vyr - rad * dyr
+            z = cz + ue * uzr + ve * vzr - rad * dzr
+            ux, uy, uz = dxr, dyr, dzr
+        else:
+            px = pcx + ue * uxr + ve * vxr
+            py = pcy + ue * uyr + ve * vyr
+            pz = pcz + ue * uzr + ve * vzr
+            ux, uy, uz = px - sx, py - sy, pz - sz
+            nrm = np.sqrt(ux * ux + uy * uy + uz * uz)
+            ux, uy, uz = ux / nrm, uy / nrm, uz / nrm
+            x, y, z = sx, sy, sz
+        n_int = 0
+        alive = True
+        # ---- hasta la caja (el origen está siempre fuera)
+        tmin, tmax = 0.0, 1e300
+        ok = True
+        for a in range(3):
+            o = x if a == 0 else (y if a == 1 else z)
+            u_ = ux if a == 0 else (uy if a == 1 else uz)
+            lo, hi = box[2 * a], box[2 * a + 1]
+            if abs(u_) > 1e-14:
+                ta, tb = (lo - o) / u_, (hi - o) / u_
+                tmin = max(tmin, min(ta, tb))
+                tmax = min(tmax, max(ta, tb))
+            elif o < lo or o > hi:
+                ok = False
+        inside = ok and tmax > tmin
+        if inside:
+            x += (tmin + 1e-9 * dx) * ux
+            y += (tmin + 1e-9 * dx) * uy
+            z += (tmin + 1e-9 * dx) * uz
+        # ---- transporte por delta tracking
+        while inside and alive:
+            f = en - e0
+            mmax = _interp_uniform(mu_max, f)
+            s = -np.log(1.0 - np.random.random()) / mmax
+            t_exit = _exit3(x, y, z, ux, uy, uz, box)
+            if s >= t_exit:
+                x += t_exit * ux
+                y += t_exit * uy
+                z += t_exit * uz
+                break
+            x += s * ux
+            y += s * uy
+            z += s * uz
+            i = int((x - box[0]) / dx)
+            j = int((y - box[2]) / dx)
+            kk = int((z - box[4]) / dx)
+            if i < 0 or i >= nx or j < 0 or j >= ny or kk < 0 or kk >= nz:
+                break
+            m = mat[kk, j, i]
+            a_pe = _interp_uniform(mu_pe[m], f)
+            a_coh = _interp_uniform(mu_coh[m], f)
+            a_inc = _interp_uniform(mu_inc[m], f)
+            a_tot = a_pe + a_coh + a_inc
+            if np.random.random() * mmax > a_tot:
+                acc[6] += 1.0
+                continue
+            acc[5] += 1.0
+            n_int += 1
+            r = np.random.random() * a_tot
+            if r < a_pe:
+                acc[2] += 1.0
+                alive = False
+                break
+            if r < a_pe + a_coh:
+                ir = int((en - ray_e0) / ray_de + 0.5)
+                ir = min(max(ir, 0), nre - 1)
+                row = ray_cdf[m, ir]
+                q = np.random.random()
+                idx = np.searchsorted(row, q)
+                if idx <= 0:
+                    cost = -1.0
+                elif idx >= ncos:
+                    cost = 1.0
+                else:
+                    den = row[idx] - row[idx - 1]
+                    frac = (q - row[idx - 1]) / den if den > 0 else 0.0
+                    cost = -1.0 + 2.0 * (idx - 1 + frac) / (ncos - 1)
+                acc[8] += 1.0
+                ux, uy, uz = _rotate(ux, uy, uz, cost, 2.0 * np.pi * np.random.random())
+            else:
+                kq = en / MEC2
+                emin = 1.0 / (1.0 + 2.0 * kq)
+                a1 = -np.log(emin)
+                a2 = 0.5 * (1.0 - emin * emin)
+                while True:
+                    if np.random.random() * (a1 + a2) < a1:
+                        eps = emin ** np.random.random()
+                    else:
+                        eps = np.sqrt(emin * emin + (1.0 - emin * emin) * np.random.random())
+                    cost = 1.0 - (1.0 / eps - 1.0) / kq
+                    sin2 = 1.0 - cost * cost
+                    tacc = 1.0 - eps * sin2 / (1.0 + eps * eps)
+                    xq = en / HC * np.sqrt(max(0.5 * (1.0 - cost), 0.0))
+                    szv = _interp_uniform(s_over_z[m], xq / x_step)
+                    if np.random.random() < tacc * szv:
+                        break
+                acc[7] += 1.0
+                en = en * eps
+                ux, uy, uz = _rotate(ux, uy, uz, cost, 2.0 * np.pi * np.random.random())
+                if en < e_min + 1e-9:
+                    acc[3] += 1.0
+                    alive = False
+                    break
+        if not alive:
+            continue
+        # ---- detección: recta desde el punto de salida hasta el plano del detector
+        den = ux * dxr + uy * dyr + uz * dzr
+        hit = False
+        iu = 0
+        iv = 0
+        if den > 1e-12:
+            if parallel:
+                t = (rad - ((x - cx) * dxr + (y - cy) * dyr + (z - cz) * dzr)) / den
+            else:
+                t = (sdd - ((x - sx) * dxr + (y - sy) * dyr + (z - sz) * dzr)) / den
+            if t >= 0.0:
+                hx, hy, hz = x + t * ux - pcx, y + t * uy - pcy, z + t * uz - pcz
+                lu = hx * uxr + hy * uyr + hz * uzr
+                lv = hx * vxr + hy * vyr + hz * vzr
+                iu = int(np.floor((lu + half_u) / bw_u))
+                iv = int(np.floor((lv + half_v) / bw_v))
+                hit = lu > -half_u and lv > -half_v and iu < nbu and iv < nbv
+        if not hit:
+            acc[4] += 1.0
+            continue
+        w = _interp_uniform(det_w, en - e0)
+        if n_int == 0:
+            prim_n[iv, iu] += 1.0
+            prim_w[iv, iu] += w
+        else:
+            scat_n[iv, iu] += 1.0
+            scat_w[iv, iu] += w

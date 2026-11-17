@@ -2,7 +2,7 @@
 
 from . import (
     spectrum, xray, optics, montecarlo, projection, quasistatic, analytic, bessel, subpixel, eit, fanbeam,
-    xray_phantoms, xray_scatter, xray_detector, xray3d,
+    xray_phantoms, xray_scatter, xray_detector, xray3d, xray3d_scatter,
 )
 from .fdtd_tm import EMResult, MaxwellTMSolver, recommended_dx, simulate_em_plane_wave
 from .fdtd_dispersive import BroadbandEMResult, BroadbandMaxwellTMSolver, wideband_pulse
@@ -13,7 +13,7 @@ from .quasistatic import (
 
 __all__ = [
     "spectrum", "xray", "optics", "montecarlo", "projection", "quasistatic", "analytic", "bessel", "subpixel", "eit",
-    "fanbeam", "xray_phantoms", "xray_scatter", "xray_detector", "xray3d",
+    "fanbeam", "xray_phantoms", "xray_scatter", "xray_detector", "xray3d", "xray3d_scatter",
     "EMResult", "MaxwellTMSolver", "recommended_dx", "BroadbandEMResult", "BroadbandMaxwellTMSolver",
     "wideband_pulse",
     "simulate_em_plane_wave", "ContactModel", "build_contact", "EITResult", "Electrodes", "QuasiStaticSolver",
