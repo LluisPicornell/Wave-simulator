@@ -28,8 +28,6 @@ import numpy as np
 from ..materials import xray_processes as xpr
 from ..phantoms.limb3d import Phantom3D
 from ..phantoms.phantom import TISSUE_INDEX
-from .xray_scatter import smooth_profile
-
 
 @dataclass
 class Scatter3DOptions:
@@ -122,10 +120,17 @@ def simulate_view(phantom: Phantom3D, theta_deg: float, geometry, spectrum, pane
     return ScatterView3D(prim_n, scat_n, prim_w, scat_w, counters, counters["w_emitted"] / (nbu * nbv))
 
 
+def _smooth_matrix(n: int, sigma: float) -> np.ndarray:
+    """Matriz de suavizado gaussiano de ``n`` bins con filas normalizadas (los bordes no pierden señal)."""
+    d = np.arange(n)[:, None] - np.arange(n)[None, :]
+    w = np.exp(-0.5 * (d / sigma) ** 2)
+    return w / w.sum(axis=1, keepdims=True)
+
+
 def _to_pixels(bins: np.ndarray, n_v: int, n_u: int, sigma: float) -> np.ndarray:
     """Suaviza los bins y los interpola linealmente (con extremos constantes) a ``(n_v, n_u)`` píxeles."""
     if sigma > 0:
-        bins = smooth_profile(smooth_profile(bins, sigma).T, sigma).T
+        bins = _smooth_matrix(bins.shape[0], sigma) @ bins @ _smooth_matrix(bins.shape[1], sigma).T
     nbv, nbu = bins.shape
     pu = (np.arange(n_u) + 0.5) / n_u * nbu - 0.5
     pv = (np.arange(n_v) + 0.5) / n_v * nbv - 0.5

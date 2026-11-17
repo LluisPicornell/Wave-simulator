@@ -419,9 +419,38 @@ def shepp_logan_3d(grid: Grid3D, scale: float = 1.0, mu: float = 1.0) -> tuple[n
 
 
 def ray_point_distance(src: np.ndarray, dirs: np.ndarray, point: np.ndarray) -> np.ndarray:
-    """Distancia de cada rayo ``(src, dirs unitarios (n, 3))`` a un punto: para las cuerdas analíticas."""
+    """Distancia de cada rayo ``(src, dirs unitarios (n, 3))`` a un punto."""
     w = point - src
     return np.linalg.norm(np.cross(dirs, w), axis=-1)
+
+
+def sphere_chords(src: np.ndarray, dirs: np.ndarray, center_xyz, radius: float) -> np.ndarray:
+    """Longitud de la cuerda de cada rayo (origen ``src``, direcciones unitarias ``(n, 3)``) en una esfera."""
+    rho2 = ray_point_distance(src, dirs, np.asarray(center_xyz, float)) ** 2
+    return 2.0 * np.sqrt(np.maximum(radius**2 - rho2, 0.0))
+
+
+def cylinder_chords(src: np.ndarray, dirs: np.ndarray, center_xyz, radius: float, axis: str, lo, hi) -> np.ndarray:
+    """Cuerda de cada rayo en un cilindro infinito de eje ``axis`` recortada a la caja ``[lo, hi]`` (x, y, z).
+
+    Resuelve ``|(o + t d - c)_perp| = R`` y la intersección con la caja: referencia analítica del
+    proyector (el cilindro infinito se recorta al dominio, como hace el proyector con el volumen).
+    """
+    k = "xyz".index(axis)
+    o = np.broadcast_to(src, dirs.shape)
+    w, e = o - np.asarray(center_xyz, float), dirs.copy()
+    w[:, k], e[:, k] = 0.0, 0.0
+    a, b, c = (e * e).sum(1), (w * e).sum(1), (w * w).sum(1) - radius**2
+    disc = b * b - a * c
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t1, t2 = (-b - np.sqrt(np.maximum(disc, 0.0))) / a, (-b + np.sqrt(np.maximum(disc, 0.0))) / a
+        ta, tb = (np.asarray(lo) - o) / dirs, (np.asarray(hi) - o) / dirs
+    par = np.abs(dirs) < 1e-12
+    inside = (o >= np.asarray(lo)) & (o <= np.asarray(hi))
+    box_lo = np.where(par, np.where(inside, -np.inf, np.inf), np.minimum(ta, tb)).max(axis=1)
+    box_hi = np.where(par, np.where(inside, np.inf, -np.inf), np.maximum(ta, tb)).min(axis=1)
+    length = np.minimum(t2, box_hi) - np.maximum(t1, box_lo)
+    return np.where((disc > 0) & (a > 1e-14), np.maximum(length, 0.0), 0.0)
 
 
 # --------------------------------------------------------------------------------------
@@ -761,4 +790,4 @@ def mu_map(phantom: Phantom3D, energy_kev: float) -> np.ndarray:
 
 __all__ = ["Geometry3D", "FlatPanel", "Projections3D", "CTVolume", "Ellipsoid", "project", "backproject",
            "acquire3d", "radiograph", "fdk", "os_sart3d", "ct_scan3d", "ellipsoid_volume", "shepp_logan_3d",
-           "ray_point_distance", "mu_map", "center"]
+           "ray_point_distance", "sphere_chords", "cylinder_chords", "mu_map", "center"]
