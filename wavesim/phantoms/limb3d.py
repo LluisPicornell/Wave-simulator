@@ -28,6 +28,7 @@ from typing import Callable
 
 import numpy as np
 
+from ..core.grid import Grid2D
 from ..core.grid3d import Grid3D
 from ..materials.tissues import tissue_keys
 from .limb import CROSS_PRESETS, PRESETS
@@ -99,6 +100,34 @@ class Phantom3D:
         het = np.zeros((g.nz, g.nx), np.float32)
         return Phantom(g.plane_xz(), self.labels[:, j, :].copy(), {k: m[:, j, :].copy() for k, m in self.masks.items()},
                        het, meta)
+
+    def slice_x(self, x: float = 0.0) -> Phantom:
+        """Corte ``x = cte`` como ``Phantom`` 2D (sección transversal si el eje del hueso va en x).
+
+        El eje horizontal del ``Phantom`` (su "x") es y y el vertical z, con
+        las coordenadas del fantoma 3D (``grid.x`` del corte = ``self.grid.y``).
+        """
+        g = self.grid
+        i = g.index_of(x, g.y0, g.z0)[2]
+        meta = dict(self.meta, x_slice=float(g.x[i]), horizontal_axis="y")
+        if self.meta.get("bone_axis") == "x":
+            meta["view"] = "cross_section"
+        grid2 = Grid2D(g.ny, g.nz, g.dx, g.y0, g.z0)
+        het = np.zeros((g.nz, g.ny), np.float32)
+        return Phantom(grid2, self.labels[:, :, i].copy(), {k: m[:, :, i].copy() for k, m in self.masks.items()},
+                       het, meta)
+
+    def slice_z(self, z: float) -> Phantom:
+        """Corte ``z = cte`` (plano coronal, paralelo a la superficie) como ``Phantom`` 2D.
+
+        El eje horizontal del ``Phantom`` es x y el "vertical" (su "z") es y.
+        """
+        g = self.grid
+        k = g.index_of(g.x0, g.y0, z)[0]
+        meta = dict(self.meta, z_slice=float(g.z[k]), horizontal_axis="x", vertical_axis="y", view="coronal")
+        grid2 = Grid2D(g.nx, g.ny, g.dx, g.x0, g.y0)
+        het = np.zeros((g.ny, g.nx), np.float32)
+        return Phantom(grid2, self.labels[k].copy(), {key: m[k].copy() for key, m in self.masks.items()}, het, meta)
 
 
 def homogeneous_phantom(grid: Grid3D, tissue: str = "water") -> Phantom3D:
