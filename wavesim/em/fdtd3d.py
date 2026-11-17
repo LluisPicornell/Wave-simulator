@@ -129,6 +129,38 @@ def node_average(cell_map: np.ndarray, axis: int) -> np.ndarray:
     return out
 
 
+def subcell_node_permittivity(grid: Grid3D, eps_at, factor: int = 5) -> np.ndarray:
+    """Promedio sub-celda de la permitividad en los nodos de Ex, Ey, Ez: ``(3, nz, ny, nx)`` complejo.
+
+    ``eps_at(x, y, z)`` da la permitividad compleja en puntos arbitrarios (la
+    geometría exacta, p. ej. una esfera). Cada nodo de la componente ``a``
+    promedia su celda dual (la celda de lado ``dx`` centrada en el nodo) con
+    ``factor³`` puntos y toma la diagonal del tensor de Meep (Farjadpour et
+    al., Opt. Lett. 31:2972, 2006): ``eps_aa = n_a² / <1/eps> + (1 - n_a²) <eps>``,
+    con ``n`` la normal de la interfaz estimada por el primer momento de
+    ``eps'`` en la celda. Con una interfaz plana normal (paralela) a ``a`` da
+    la media armónica (aritmética), que es la exacta. Sólo banda estrecha:
+    la media armónica de dos Debye no es un Debye.
+    """
+    off = ((np.arange(factor) + 0.5) / factor - 0.5) * grid.dx
+    oz, oy, ox = (o.ravel() for o in np.meshgrid(off, off, off, indexing="ij"))
+    out = np.empty((3,) + grid.shape, complex)
+    for c, comp in enumerate(COMPONENTS):
+        shift = np.zeros(3)
+        shift[AXES[comp]] = 0.5 * grid.dx  # (z, y, x)
+        yy, xx = np.meshgrid(grid.y + shift[1], grid.x + shift[2], indexing="ij")
+        for k, z in enumerate(grid.z + shift[0]):
+            e = np.asarray(eps_at(xx[..., None] + ox, yy[..., None] + oy, z + oz), dtype=complex)
+            mean = e.mean(axis=-1)
+            harm = 1.0 / (1.0 / e).mean(axis=-1)
+            w = e.real - e.real.mean(axis=-1, keepdims=True)
+            nvec = np.stack([(w * o).sum(axis=-1) for o in (oz, oy, ox)])
+            norm = np.sqrt((nvec ** 2).sum(axis=0))
+            na2 = np.where(norm > 0, (nvec[AXES[comp]] / np.where(norm > 0, norm, 1.0)) ** 2, 0.0)
+            out[c, k] = na2 * harm + (1.0 - na2) * mean
+    return out
+
+
 def debye_maps_3d(phantom, model: TissueDebyeModel) -> DebyeMedium:
     """Mapas ``(nz, ny, nx)`` de ``eps_inf`` y ``sigma`` y ``(K, nz, ny, nx)`` de ``d_eps`` de un ``Phantom3D``.
 
@@ -231,6 +263,10 @@ class EM3DResult:
     lámina) o ``"moment"`` (V/m por A·m de momento del dipolo).
     ``incident``: fasor del campo incidente en cada z de la malla (con la misma
     normalización; ``NaN`` fuera de la malla auxiliar), sólo con onda plana.
+    ``power_density``: potencia disipada (W/m³) calculada en los nodos de Yee con
+    la ``sigma`` de cada nodo (``1/2 sum_c sigma_c |E_c|²``) y llevada a las
+    celdas: es la que de verdad disipa el esquema, también con promedio
+    sub-celda. ``sar`` usa la ``sigma`` y el ``|E|`` de la celda, como el 2D.
     """
 
     f0: float
@@ -246,6 +282,7 @@ class EM3DResult:
     elapsed_s: float
     incident: np.ndarray | None = None
     polarization: str | None = None
+    power_density: np.ndarray | None = None
     _cache: dict = field(default_factory=dict, repr=False)
 
     @property
@@ -265,8 +302,13 @@ class EM3DResult:
         return self.sigma * self.e_squared / (2.0 * self.density)
 
     def absorbed_power(self, mask: np.ndarray | None = None) -> float:
-        """Potencia absorbida ``sum 1/2 sigma |E|² dV`` (W) en las celdas de ``mask`` (todas por defecto)."""
-        p = 0.5 * self.sigma * self.e_squared * self.grid.dx ** 3
+        """Potencia absorbida (W) en las celdas de ``mask`` (todas por defecto).
+
+        Con ``power_density`` (banda estrecha) suma la disipada en los nodos;
+        sin ella, ``sum 1/2 sigma |E|² dV`` con los valores de celda.
+        """
+        pd = self.power_density if self.power_density is not None else 0.5 * self.sigma * self.e_squared
+        p = pd * self.grid.dx ** 3
         return float(p.sum() if mask is None else p[mask].sum())
 
     def tissue_mask(self, exclude: tuple[str, ...] = ("water", "air")) -> np.ndarray:
@@ -858,11 +900,14 @@ class Maxwell3DSolver(YeeGrid3D):
       que sustituye a la del fantoma (el fantoma sigue dando la densidad).
     - ``permittivity(tejido, f)``: modelo de los tejidos (Gabriel por defecto;
       p. ej. el ajuste de Debye para compararlo con la banda ancha).
+    - ``node_eps``: ``(3, nz, ny, nx)`` permitividades complejas en los nodos de
+      Ex, Ey, Ez que sustituyen a la media de las dos celdas (p. ej. el promedio
+      sub-celda de ``subcell_node_permittivity``).
     """
 
     def __init__(self, phantom, f0: float, npml=12, cfl: float = 0.95, dtype=np.float32,
                  eps_map: np.ndarray | None = None, permittivity=None, backend: str = "auto",
-                 dt: float | None = None):
+                 dt: float | None = None, node_eps: np.ndarray | None = None):
         self.f0 = float(f0)
         g = phantom.grid
         get = permittivity or (lambda k, f: complex(dielectric.complex_permittivity(k, f)))
@@ -880,15 +925,18 @@ class Maxwell3DSolver(YeeGrid3D):
                           "reduce dx.", stacklevel=2)
         self._setup_yee(phantom, npml, cfl, dt, dtype, f_ref=f0, backend=backend)
         w = 2.0 * np.pi * f0
-        self.ca, self.cb, self._eps_r_node = {}, {}, {}
-        for comp in COMPONENTS:
-            node = node_average(eps_map, AXES[comp])
+        self.ca, self.cb, self._eps_r_node, self._sigma_node = {}, {}, {}, {}
+        if node_eps is not None and np.shape(node_eps) != (3,) + g.shape:
+            raise ValueError(f"node_eps debe tener forma {(3,) + g.shape}")
+        for c, comp in enumerate(COMPONENTS):
+            node = node_average(eps_map, AXES[comp]) if node_eps is None else np.asarray(node_eps[c], complex)
             eps = node.real * EPS0
             sigma = -node.imag * w * EPS0
             k = sigma * self.dt / (2 * eps)
             self.ca["e" + comp] = ((1 - k) / (1 + k)).astype(self.dtype)
             self.cb["e" + comp] = (self.dt / eps / (1 + k)).astype(self.dtype)
             self._eps_r_node["e" + comp] = node.real.astype(np.float32)
+            self._sigma_node["e" + comp] = sigma.astype(np.float32)
 
     def _cell_medium(self) -> np.ndarray:
         return np.stack([self.eps_cell.real, self.eps_cell.imag])
@@ -973,12 +1021,17 @@ class Maxwell3DSolver(YeeGrid3D):
 
         norm, incident = self._normalization(None if aux_acc is None else phasor(aux_acc)[None, :],
                                              np.array([-1j]))
-        e = center_fields(*(phasor(acc[c][0]) / norm[0] for c in ("ex", "ey", "ez")), extended=extended)
+        nodes = {c: phasor(acc[c][0]) / norm[0] for c in ("ex", "ey", "ez")}
+        del acc
+        e = center_fields(*(nodes[c] for c in ("ex", "ey", "ez")), extended=extended)
+        pd = center_fields(*(0.5 * self._sigma_node[c] * np.abs(nodes[c]) ** 2 for c in ("ex", "ey", "ez")),
+                           extended=extended).sum(axis=0)
+        del nodes
         w = 2.0 * np.pi * self.f0
         sigma = -self.eps_cell.imag * w * EPS0
         return EM3DResult(self.f0, e, g, self.eps_cell.real.copy(), sigma, _density(self.phantom),
                           self.phantom.labels, self._norm_name(), self.dt, nt, elapsed,
-                          None if incident is None else incident[0], self.polarization)
+                          None if incident is None else incident[0], self.polarization, pd)
 
 # ----------------------------------------------------------------------------
 # Banda ancha (Debye multipolo)

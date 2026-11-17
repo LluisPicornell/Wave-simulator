@@ -289,3 +289,18 @@ def test_mie_campo_continuidad_y_absorcion():
     k0 = 2 * np.pi * f / analytic.C0
     q_vol = k0 * (-eps.imag) * integral / (np.pi * a ** 2)
     assert abs(q_vol / analytic.mie_sphere_efficiencies(eps, a, f)[2] - 1) < 1e-6
+
+
+def test_promedio_subcelda_interfaz_plana():
+    """Interfaz plana normal a z que parte las celdas duales: Ez toma la media armónica y Ex, Ey la aritmética."""
+    from wavesim.em.fdtd3d import subcell_node_permittivity
+
+    g = Grid3D(4, 4, 6, 1e-3)
+    e1, e2 = 2.0 - 0.5j, 40.0 - 10.0j
+    # La interfaz z = 2.3 mm corta la celda dual de Ex (centrada en z = 2 mm) y la de Ez (en z = 2.5 mm)
+    node = subcell_node_permittivity(g, lambda x, y, z: np.where(z < 2.3e-3, e1, e2), factor=10)
+    f_ex = 0.8  # fracción de e1 en [1.5, 2.5] mm
+    np.testing.assert_allclose(node[0, 2], f_ex * e1 + (1 - f_ex) * e2, rtol=1e-12)
+    f_ez = 0.3  # fracción de e1 en [2.0, 3.0] mm
+    np.testing.assert_allclose(node[2, 2], 1 / (f_ez / e1 + (1 - f_ez) / e2), rtol=1e-12)
+    np.testing.assert_allclose(node[:, 0], e1)
