@@ -141,3 +141,127 @@ def mie_cylinder_tm(x, z, radius: float, eps_in: complex, f: float, eps_out: flo
         scat = np.sum((weight * a)[:, None] * hn * cos_n, axis=0)
         out[outside] = np.exp(-1j * k_out * z[outside]) + scat
     return out
+
+
+# --------------------------------------------------------------------------
+# Esfera (Mie 3D)
+# --------------------------------------------------------------------------
+# Se calcula con el convenio e^{-iwt} de Bohren y Huffman (cap. 4: eq. 4.40-4.53, con mu1 = mu) y se
+# conjuga al final: el fasor de wavesim (e^{+jwt}) es el conjugado del de B&H, y su índice relativo
+# m_BH = conj(sqrt(eps_in / eps_out)) tiene parte imaginaria positiva.
+def mie_n_max(size: float) -> int:
+    """Órdenes de la serie para un parámetro de tamaño ``|m| x``: el criterio de Wiscombe con margen."""
+    return int(np.ceil(size + 4.0 * size ** (1.0 / 3.0) + 10))
+
+
+def _mie_terms(m: complex, x: float, n_max: int):
+    """``(a_n, b_n, c_n, d_n)``, ``n = 1..n_max``, de B&H (``m`` con Im >= 0, ``x`` real)."""
+    jx = bessel.spherical_jn_orders(n_max, np.array(x))
+    yx = bessel.spherical_yn_orders(n_max, np.array(x))
+    hx = jx + 1j * yx  # h_n^(1): onda saliente con e^{-iwt}
+    jm = bessel.spherical_jn_orders(n_max, np.array(m * x))
+    psi_x, xi_x, psi_m = x * jx, x * hx, m * x * jm
+    dpsi_x = bessel.riccati_derivative(jx, x)
+    dxi_x = bessel.riccati_derivative(hx, x)
+    dpsi_m = bessel.riccati_derivative(jm, m * x)
+    sl = slice(1, None)
+    den_a = m * psi_m[sl] * dxi_x[sl] - xi_x[sl] * dpsi_m[sl]
+    den_b = psi_m[sl] * dxi_x[sl] - m * xi_x[sl] * dpsi_m[sl]
+    a = (m * psi_m[sl] * dpsi_x[sl] - psi_x[sl] * dpsi_m[sl]) / den_a
+    b = (psi_m[sl] * dpsi_x[sl] - m * psi_x[sl] * dpsi_m[sl]) / den_b
+    # Numeradores de c_n y d_n por el wronskiano psi xi' - xi psi' = i (sin dividir por j_n(m x))
+    c = 1j * m / den_b
+    d = 1j * m / den_a
+    return a, b, c, d
+
+
+def mie_sphere_efficiencies(eps_in: complex, radius: float, f: float, eps_out: float = 1.0,
+                            n_max: int | None = None) -> tuple[float, float, float]:
+    """``(Q_ext, Q_sca, Q_abs)`` de una esfera de permitividad ``eps_in`` (``eps' - j eps''``) en ``eps_out`` real.
+
+    Secciones eficaces divididas por ``pi a²``. ``C_abs = Q_abs pi a²`` es la
+    potencia absorbida por unidad de intensidad incidente ``|E0|² / (2 eta_out)``.
+    """
+    k_out = 2.0 * np.pi * f / C0 * np.sqrt(float(np.real(eps_out)))
+    x = k_out * radius
+    m = np.conj(np.sqrt(complex(eps_in) / float(np.real(eps_out))))
+    n_max = n_max or mie_n_max(abs(m) * x)
+    a, b, _, _ = _mie_terms(m, x, n_max)
+    n = np.arange(1, n_max + 1)
+    q_ext = 2.0 / x ** 2 * float(np.sum((2 * n + 1) * (a + b).real))
+    q_sca = 2.0 / x ** 2 * float(np.sum((2 * n + 1) * (np.abs(a) ** 2 + np.abs(b) ** 2)))
+    return q_ext, q_sca, q_ext - q_sca
+
+
+def _angular(n_max: int, mu: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """``pi_n(cos t)`` y ``tau_n(cos t)``, ``n = 0..n_max`` (B&H 4.47)."""
+    pi = np.zeros((n_max + 1,) + mu.shape)
+    tau = np.zeros_like(pi)
+    if n_max >= 1:
+        pi[1] = 1.0
+    for n in range(2, n_max + 1):
+        pi[n] = (2 * n - 1) / (n - 1) * mu * pi[n - 1] - n / (n - 1) * pi[n - 2]
+    for n in range(1, n_max + 1):
+        tau[n] = n * mu * pi[n] - (n + 1) * pi[n - 1]
+    return pi, tau
+
+
+def mie_sphere_field(x, y, z, radius: float, eps_in: complex, f: float, eps_out: float = 1.0,
+                     center: tuple[float, float, float] = (0.0, 0.0, 0.0), n_max: int | None = None) -> np.ndarray:
+    """Campo total ``(Ex, Ey, Ez)`` de la onda plana ``x̂ e^{-jk(z - z_c)}`` sobre una esfera (convenio wavesim).
+
+    Forma de salida ``(3,) + x.shape``. Dentro, la serie de ``c_n``, ``d_n`` con
+    ``j_n(m k r)``; fuera, la onda incidente más la dispersada (``a_n``, ``b_n``
+    con ``h_n``). La onda incidente va hacia +z con E a lo largo de x y amplitud
+    1 en el centro de la esfera.
+    """
+    k_out = 2.0 * np.pi * f / C0 * np.sqrt(float(np.real(eps_out)))
+    m = np.conj(np.sqrt(complex(eps_in) / float(np.real(eps_out))))
+    xs = k_out * radius
+    n_max = n_max or mie_n_max(abs(m) * xs)
+    a, b, c, d = _mie_terms(m, xs, n_max)
+    px, py, pz = (np.asarray(v, dtype=float) - c0 for v, c0 in zip((x, y, z), center))
+    shape = np.broadcast(px, py, pz).shape
+    px, py, pz = (np.broadcast_to(v, shape).ravel() for v in (px, py, pz))
+    r = np.sqrt(px ** 2 + py ** 2 + pz ** 2)
+    r = np.maximum(r, 1e-9 * radius)  # en el centro sólo sobrevive n = 1 y el límite es finito
+    cos_t = np.clip(pz / r, -1.0, 1.0)
+    sin_t = np.sqrt(1.0 - cos_t ** 2)
+    phi = np.arctan2(py, px)
+    cos_p, sin_p = np.cos(phi), np.sin(phi)
+    pi_n, tau_n = _angular(n_max, cos_t)
+    n = np.arange(n_max + 1)[:, None]
+    e_n = np.zeros((n_max + 1, 1), dtype=complex)
+    e_n[1:, 0] = (1j ** n[1:, 0]) * (2 * n[1:, 0] + 1) / (n[1:, 0] * (n[1:, 0] + 1))
+    out_bh = np.zeros((3, r.size), dtype=complex)  # (E_r, E_theta, E_phi)
+    inside = r <= radius
+    for sel, rho_k, cm, cn, radial in ((inside, m * k_out, c, d, "j"), (~inside, k_out, b, a, "h")):
+        if not sel.any():
+            continue
+        rho = rho_k * r[sel]
+        zn = bessel.spherical_jn_orders(n_max, rho)
+        if radial == "h":
+            zn = zn + 1j * bessel.spherical_yn_orders(n_max, rho.real)
+        dz = bessel.riccati_derivative(zn, rho) / rho  # [rho z_n]'/rho
+        coef_m = np.zeros((n_max + 1, 1), dtype=complex)
+        coef_n = np.zeros((n_max + 1, 1), dtype=complex)
+        if radial == "j":
+            coef_m[1:, 0], coef_n[1:, 0] = cm, -1j * cn           # c_n M_o1n - i d_n N_e1n
+        else:
+            coef_m[1:, 0], coef_n[1:, 0] = -cm, 1j * cn           # i a_n N_e1n - b_n M_o1n
+        en, pi_s, tau_s = e_n, pi_n[:, sel], tau_n[:, sel]
+        st = sin_t[sel]
+        er = np.sum(en * coef_n * n * (n + 1) * st * pi_s * zn / rho, axis=0)
+        et = np.sum(en * (coef_m * pi_s * zn + coef_n * tau_s * dz), axis=0)
+        ep = np.sum(en * (coef_m * tau_s * zn + coef_n * pi_s * dz), axis=0)
+        out_bh[0, sel] = cos_p[sel] * er
+        out_bh[1, sel] = cos_p[sel] * et
+        out_bh[2, sel] = -sin_p[sel] * ep
+    er, et, ep = out_bh
+    ex = sin_t * cos_p * er + cos_t * cos_p * et - sin_p * ep
+    ey = sin_t * sin_p * er + cos_t * sin_p * et + cos_p * ep
+    ez = cos_t * er - sin_t * et
+    field = np.conj(np.stack([ex, ey, ez]))
+    # Fuera: + onda incidente (exacta) x̂ e^{-jkz}
+    field[0, ~inside] += np.exp(-1j * k_out * pz[~inside])
+    return field.reshape((3,) + shape)

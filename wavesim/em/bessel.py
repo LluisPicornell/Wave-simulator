@@ -176,3 +176,68 @@ def derivative_orders(f_orders: np.ndarray) -> np.ndarray:
     d[0] = -f_orders[1]
     d[1:] = 0.5 * (f_orders[:-2] - f_orders[2:])
     return d
+
+
+# --------------------------------------------------------------------------
+# Funciones esféricas de Bessel (serie de Mie 3D)
+# --------------------------------------------------------------------------
+def spherical_jn_orders(n_max: int, z) -> np.ndarray:
+    """``j_0(z) .. j_{n_max}(z)`` (esféricas) para ``z`` complejo; forma ``(n_max + 1,) + z.shape``.
+
+    Cocientes ``r_n = j_n / j_{n-1}`` por la fracción continua hacia atrás
+    ``r_n = z / (2n + 1 - z r_{n+1})`` (``j_n`` es la solución mínima de la
+    recurrencia, así que hacia atrás es estable para todo ``z``), y escala con
+    las formas cerradas ``j_0 = sin z / z`` o ``j_1 = sin z / z² - cos z / z``,
+    la de mayor módulo (``j_0`` se anula en ``z = k pi``). ``z = 0`` da ``j_0 = 1``.
+    """
+    z_in = np.asarray(z, dtype=complex)
+    flat = z_in.ravel()
+    out = np.zeros((n_max + 1, flat.size), dtype=complex)
+    zero = flat == 0
+    zz = np.where(zero, 1.0, flat)
+    n_start = n_max + int(np.abs(flat).max(initial=0.0)) + 40
+    ratio = np.zeros((n_start + 2, flat.size), dtype=complex)
+    for n in range(n_start, 0, -1):
+        ratio[n] = zz / (2 * n + 1 - zz * ratio[n + 1])
+    j0 = np.sin(zz) / zz
+    j1 = np.sin(zz) / zz ** 2 - np.cos(zz) / zz
+    use0 = np.abs(j0) >= np.abs(j1)
+    out[0] = np.where(use0, j0, j1 / np.where(use0, 1.0, ratio[1]))
+    if n_max >= 1:
+        # Con la escala de j_1 no se multiplica por un j_0 casi nulo
+        out[1] = np.where(use0, j0 * ratio[1], j1)
+        for n in range(2, n_max + 1):
+            out[n] = out[n - 1] * ratio[n]
+    out[:, zero] = 0.0
+    out[0, zero] = 1.0
+    return out.reshape((n_max + 1,) + z_in.shape)
+
+
+def spherical_yn_orders(n_max: int, x) -> np.ndarray:
+    """``y_0(x) .. y_{n_max}(x)`` (esféricas, de Neumann) para ``x`` real positivo.
+
+    Recurrencia hacia arriba ``y_{n+1} = (2n + 1)/x y_n - y_{n-1}`` desde las
+    formas cerradas: estable porque ``y_n`` es la solución dominante.
+    """
+    x = np.asarray(x, dtype=float)
+    if np.any(x <= 0):
+        raise ValueError("y_n esférica sólo para x > 0")
+    out = np.empty((n_max + 1,) + x.shape)
+    out[0] = -np.cos(x) / x
+    if n_max >= 1:
+        out[1] = -np.cos(x) / x ** 2 - np.sin(x) / x
+    for n in range(1, n_max):
+        out[n + 1] = (2 * n + 1) / x * out[n] - out[n - 1]
+    return out
+
+
+def riccati_derivative(f_orders: np.ndarray, z) -> np.ndarray:
+    """``[z f_n(z)]' = z f_{n-1}(z) - n f_n(z)`` para ``n = 1..N`` a partir de ``f_0..f_N`` (fila 0 sin uso).
+
+    Vale para ``j_n``, ``y_n`` y ``h_n`` (todas cumplen la misma recurrencia).
+    """
+    z = np.asarray(z)
+    n = np.arange(f_orders.shape[0]).reshape((-1,) + (1,) * z.ndim)
+    out = np.zeros_like(f_orders)
+    out[1:] = z * f_orders[:-1] - n[1:] * f_orders[1:]
+    return out
