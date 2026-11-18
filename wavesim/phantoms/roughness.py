@@ -84,3 +84,72 @@ class SumProfile:
 
     def __call__(self, s) -> np.ndarray:
         return sum(p(s) for p in self.profiles)
+
+
+class RoughSurface:
+    """Campo rugoso ``h(a, b)`` sobre una superficie (generalización 2D de ``RoughProfile``).
+
+    Ruido blanco filtrado en Fourier con la autocorrelación gaussiana
+    isótropa ``exp(-r²/corr_len²)`` de ``RoughProfile`` y desviación típica
+    ``rms``. Se sintetiza en una malla propia de paso ``corr_len / 6``
+    (independiente de la malla de simulación: la misma semilla da la misma
+    superficie a cualquier ``dx``) y se evalúa por interpolación bilineal.
+    ``a`` cubre ``[a0, a0 + length_a]`` (fuera se prolonga el borde); ``b``
+    cubre ``[b0, b0 + length_b]`` y es periódica si ``periodic_b`` (la
+    coordenada de arco alrededor de un hueso o de la piel).
+
+    Para que la síntesis no se dispare con superficies grandes y rugosidad
+    muy fina, el paso crece hasta que la malla tenga como mucho ``max_points``
+    nodos (sigue sin depender de ``dx``; sólo pierde algo de la cola fina del
+    espectro).
+    """
+
+    def __init__(self, length_a: float, length_b: float, rms: float, corr_len: float, rng: np.random.Generator,
+                 periodic_b: bool = False, a0: float = 0.0, b0: float = 0.0, max_points: int = 4_000_000):
+        self.a0, self.b0 = a0, b0
+        self.length_b = length_b
+        self.periodic_b = periodic_b
+        self.zero = rms <= 0 or corr_len <= 0
+        self.max_abs = 0.0
+        if self.zero:
+            return
+        ds = corr_len / 6.0
+        pad = 0.0 if periodic_b else 4.0 * corr_len
+        span_a, span_b = length_a + 4.0 * corr_len, length_b + pad
+        ds = max(ds, np.sqrt(span_a * span_b / max_points))
+        na = max(int(np.ceil(span_a / ds)), 16)
+        nb = max(int(np.ceil(span_b / ds)), 16)
+        self.da, self.db = span_a / na, span_b / nb
+        ka = 2.0 * np.pi * np.fft.fftfreq(na, d=self.da)
+        kb = 2.0 * np.pi * np.fft.rfftfreq(nb, d=self.db)
+        amplitude = np.exp(-((ka[:, None] ** 2 + kb[None, :] ** 2) * corr_len**2) / 8.0)
+        noise = np.fft.rfft2(rng.standard_normal((na, nb)))
+        h = np.fft.irfft2(noise * amplitude, s=(na, nb))
+        h *= rms / (h.std() + 1e-30)
+        # El tramo útil empieza 2·corr_len dentro del sintetizado: sin periodicidad,
+        # los extremos de la FFT quedan correlacionados entre sí y se descartan.
+        self._a_start = a0 - 2.0 * corr_len
+        self._b_start = b0 if periodic_b else b0 - 2.0 * corr_len
+        self.na, self.nb = na, nb
+        self._h = h.astype(np.float32)
+        self.max_abs = float(np.abs(h).max())
+
+    def __call__(self, a, b) -> np.ndarray:
+        a, b = np.broadcast_arrays(np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64))
+        if self.zero:
+            return np.zeros(a.shape, dtype=np.float32)
+        fa = np.clip((a - self._a_start) / self.da, 0.0, self.na - 1.000001)
+        fb = (b - self._b_start) / self.db
+        if self.periodic_b:
+            fb = np.mod(fb, self.nb)
+        else:
+            fb = np.clip(fb, 0.0, self.nb - 1.000001)
+        ia = fa.astype(np.intp)
+        ib = fb.astype(np.intp)
+        wa = (fa - ia).astype(np.float32)
+        wb = (fb - ib).astype(np.float32)
+        ib1 = (ib + 1) % self.nb if self.periodic_b else ib + 1
+        h = self._h
+        top = h[ia, ib] * (1 - wb) + h[ia, ib1] * wb
+        bottom = h[ia + 1, ib] * (1 - wb) + h[ia + 1, ib1] * wb
+        return top * (1 - wa) + bottom * wa
