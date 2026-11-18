@@ -1114,11 +1114,9 @@ class BroadbandMaxwell3DSolver(YeeGrid3D):
         g = self.grid
         return float(np.asarray(self.medium.eps_inf)[k0, g.ny // 2, g.nx // 2])
 
-    def _eta(self, comp, sl):
-        raise ValueError("la lámina de corriente sólo existe en banda estrecha: usa set_plane_wave o set_dipole")
-
     def set_current_sheet(self, *args, **kwargs):
-        self._eta("ey", None)
+        """No disponible: la lámina del 2D se normaliza con la impedancia a una sola frecuencia."""
+        raise ValueError("la lámina de corriente sólo existe en banda estrecha: usa set_plane_wave o set_dipole")
 
     def _eps_node(self, comp):
         return self._eps_inf_node[comp]

@@ -108,8 +108,9 @@ def case_plane():
                 b, a = fit_beta_alpha(col[sel], g.z[sel])
                 print(f"| {tissue} | {f0 / 1e9:.3g} GHz | E ∥ {pol} | {b / beta - 1:+.3%} | {a / alpha - 1:+.3%} |")
     print("\n## 1b. Dipolo puntual frente al dipolo de Hertz (plano ecuatorial y = 0, Ez a lo largo de x)\n")
-    print("| medio | f | dx | r (celdas) | error L2 de Ez | error de |Ez| máx. | malla | tiempo |")
-    print("|---|---|---|---|---|---|---|---|")
+    print("| medio | f | dx | r (celdas) | error L2 de Ez | error L2, r >= 8 celdas | error de \\|Ez\\| máx. | malla "
+          "| tiempo |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for tissue, f0, ppw in (("air", 2.45e9, 20), ("muscle", 2.45e9, 20)):
         eps = complex(dielectric.complex_permittivity(tissue, f0))
         dx = C0 / f0 / abs(np.sqrt(eps)) / ppw
@@ -127,10 +128,12 @@ def case_plane():
         fd = r.e[2, mid, mid, ii]
         # Ez centrado = media de los nodos z = -dx/2 y +dx/2 de la celda; el dipolo está en el nodo +dx/2 (z = 0)
         ex = 0.5 * (hertz_dipole_ez(x, -dx, f0, eps) + hertz_dipole_ez(x, 0 * x, f0, eps))
+        far = ii - mid >= 8
         err = np.linalg.norm(fd - ex) / np.linalg.norm(ex)
+        err_far = np.linalg.norm(fd[far] - ex[far]) / np.linalg.norm(ex[far])
         err_mag = np.max(np.abs(np.abs(fd) / np.abs(ex) - 1))
         print(f"| {tissue} | {f0 / 1e9:.3g} GHz | {dx * 1e3:.2f} mm | {ii[0] - mid}-{ii[-1] - mid} | {err:.2%} | "
-              f"{err_mag:.2%} | {n}³ | {el:.0f} s |")
+              f"{err_far:.2%} | {err_mag:.2%} | {n}³ | {el:.0f} s |")
 
 
 # ----------------------------------------------------------------------------
@@ -173,7 +176,7 @@ def case_slab():
         p = slab_phantom_3d(dx)
         g = p.grid
         kb = g.index_of(0, 0, 30e-3 + D + 10e-3)[0]
-        ka = g.index_of(0, 0, 30e-3 - 8e-3)[0]
+        ka = 21  # por encima de la cara superior de la caja TF/SF (k0 = npml + 3 = 23): sólo la onda reflejada
         t_ex = analytic.insertion_transmission(LAYERS, f0, outer="air")
         r_ex, _ = analytic.multilayer_rt([dielectric.complex_permittivity(k, f0) for k, _ in LAYERS],
                                          [d for _, d in LAYERS], f0)
@@ -424,15 +427,15 @@ def penetration(e2_line, z, z_skin, z_bone):
 
 
 def case_leg(freqs=(915e6, 2.45e9)):
-    spec = LegSegmentSpec(muscle=10e-3, standoff=16e-3)
+    spec = LegSegmentSpec(muscle=10e-3, standoff=24e-3)
     frac = TransverseFracture3D(gap=2e-3, position=0.0)
     print("\n## 7. Pierna 3D (tibia tubular, 10 mm de músculo, fractura transversal de 2 mm) en agua\n")
     rows = []
     for f0 in freqs:
         dx = 1.5e-3 if f0 < 1.5e9 else 0.8e-3
         npml = 10
-        p_frac = leg_segment(spec, frac, length=40e-3, dx=dx, margin=16e-3)
-        p_int = leg_segment(spec, None, length=40e-3, dx=dx, margin=16e-3)
+        p_frac = leg_segment(spec, frac, length=40e-3, dx=dx, margin=24e-3)
+        p_int = leg_segment(spec, None, length=40e-3, dx=dx, margin=24e-3)
         g = p_frac.grid
         meta = p_frac.meta
         z_skin = meta["skin_depth"]
