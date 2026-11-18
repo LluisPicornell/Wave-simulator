@@ -31,8 +31,9 @@ media aritmética de ``eps*`` (``eps'`` y ``sigma``, o ``eps_inf``, ``sigma`` y
 ``d_eps_k``) de las dos celdas que separa (como gprMax). La media es lineal,
 así que con polos comunes sigue siendo un Debye pasivo. En una capa plana
 normal a z (la losa) las componentes Ex y Ey caen en los centros de celda en z
-y la interfaz queda a medio camino entre dos nodos, como en 2D. No hay
-promedio sub-celda (ver ``docs/validacion/maxwell3d.md``).
+y la interfaz queda a medio camino entre dos nodos, como en 2D. En banda
+estrecha, ``subcell_node_permittivity`` da un promedio sub-celda a partir de
+una geometría analítica (``node_eps``); ver ``docs/validacion/maxwell3d.md``.
 
 **Fuentes.**
 

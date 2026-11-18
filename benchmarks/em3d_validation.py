@@ -9,7 +9,7 @@ Uso (desde la raíz del repositorio; Numba recomendado):
     python benchmarks/em3d_validation.py --case mie        # esfera frente a la serie de Mie (~8 min)
     python benchmarks/em3d_validation.py --case broadband  # un pulso frente a varias ondas continuas (~2 min)
     python benchmarks/em3d_validation.py --case speed      # Mceldas·paso/s y memoria (~1 min)
-    python benchmarks/em3d_validation.py --case leg        # pierna a 915 MHz y 2.45 GHz, 3D frente a 2D (~12 min)
+    python benchmarks/em3d_validation.py --case leg        # pierna a 915 MHz y 2.45 GHz, 3D frente a 2D (~15 min)
 
 Casos (las tablas de ``docs/validacion/maxwell3d.md`` salen de aquí):
 
@@ -32,11 +32,12 @@ Casos (las tablas de ``docs/validacion/maxwell3d.md`` salen de aquí):
    con la misma permitividad (el ajuste de Debye) y frente a la matriz de
    transferencia; esfera de cortical con el pulso frente a Mie.
 6. ``speed``: rendimiento con 1 y 4 hilos, NumPy/Numba, float32/float64.
-7. ``leg``: segmento de pierna (``leg_segment``, tibia tubular, 10 mm de
-   músculo, fractura transversal de 2 mm) en agua, onda plana desde arriba a
-   915 MHz y 2.45 GHz con E ∥ y E ⊥ al hueso: penetración, SAR pico y
-   promediado (1 g, 10 g), potencia en el hueso; y frente al 2D TM en el corte
-   transversal (E ∥ hueso) y en el longitudinal (E ⊥ hueso, la pierna como capas planas).
+7. ``leg``: pierna de ``limb_3d("pierna")`` (tibia y peroné, sin rugosidad,
+   fractura transversal de 2 mm en la tibia) en agua, onda plana desde arriba
+   a 915 MHz y 2.45 GHz con E ∥ y E ⊥ al hueso: SAR pico y promediado (1 g,
+   10 g), fracción de la potencia en el hueso y a más de 2 cm; frente al 2D TM
+   en el corte transversal (E ∥ hueso) y en el longitudinal (E ⊥ hueso, la
+   pierna como capas planas), y contraste de la fractura en 3D y en 2D.
 """
 
 from __future__ import annotations
@@ -57,8 +58,8 @@ from wavesim.em.fdtd3d import (
 )
 from wavesim.materials import dielectric
 from wavesim.materials.dispersive import tissue_debye_model
-from wavesim.phantoms.limb3d import LegSegmentSpec, Phantom3D, TransverseFracture3D, extrude, homogeneous_phantom, \
-    leg_segment
+from wavesim.phantoms import Fracture3D, LIMB3D_PRESETS, limb_3d, limb_grid
+from wavesim.phantoms.limb3d import Phantom3D, extrude, homogeneous_phantom
 from wavesim.phantoms.phantom import TISSUE_INDEX, Phantom
 
 C0 = dielectric.C0
@@ -407,130 +408,119 @@ def case_speed():
 # ----------------------------------------------------------------------------
 # 7. Pierna
 # ----------------------------------------------------------------------------
-def leg_metrics(res):
-    """SAR pico, promediado en 1 g y 10 g y fracción de la potencia absorbida en el hueso (con la médula)."""
-    tissue = res.tissue_mask()
-    sar = res.sar
-    bone = np.isin(res.labels, [TISSUE_INDEX[k] for k in ("cortical_bone", "marrow", "hematoma")])
-    p_tot = res.absorbed_power(tissue)
-    return dict(sar_peak=float(sar[tissue].max()), sar1=float(res.averaged_sar(1e-3).max()),
-                sar10=float(res.averaged_sar(10e-3).max()), p_bone=res.absorbed_power(bone) / p_tot, p_tot=p_tot)
+BONE_KEYS = ("cortical_bone", "trabecular_bone", "marrow", "hematoma", "edema")
 
 
-def penetration(e2_line, z, z_skin, z_bone):
-    """Longitud de decaimiento de |E|² en el músculo: ajuste exponencial entre piel + 5.5 mm y la cortical."""
-    sel = (z > z_skin + 5.5e-3) & (z < z_bone - 0.5e-3)
-    if sel.sum() < 3:
-        return np.nan
-    slope = np.polyfit(z[sel], np.log(e2_line[sel]), 1)[0]
-    return -1.0 / slope
+def power_fractions(pd, labels, z, z_skin, deep=20e-3):
+    """Fracción de la potencia absorbida en el tejido que cae en el hueso y a más de ``deep`` bajo la piel."""
+    tissue = ~np.isin(labels, [TISSUE_INDEX["water"], TISSUE_INDEX["air"]])
+    bone = np.isin(labels, [TISSUE_INDEX[k] for k in BONE_KEYS])
+    zz = z.reshape((-1,) + (1,) * (labels.ndim - 1))
+    total = pd[tissue].sum()
+    return pd[bone].sum() / total, pd[tissue & (zz > z_skin + deep)].sum() / total
+
+
+def leg_phantom(fracture, dx, length, pad):
+    """``limb_3d("pierna")`` sin rugosidad, con ``pad`` celdas más de agua arriba y abajo (caras de la TF/SF)."""
+    spec = LIMB3D_PRESETS["pierna"]
+    g0 = limb_grid(spec, length, dx)
+    grid = Grid3D(g0.nx, g0.ny, g0.nz + 2 * pad, dx, g0.x0, g0.y0, g0.z0 - pad * dx)
+    return limb_3d("pierna", fracture, length=length, dx=dx, grid=grid, roughness=False)
 
 
 def case_leg(freqs=(915e6, 2.45e9)):
-    spec = LegSegmentSpec(muscle=10e-3, standoff=24e-3)
-    frac = TransverseFracture3D(gap=2e-3, position=0.0)
-    print("\n## 7. Pierna 3D (tibia tubular, 10 mm de músculo, fractura transversal de 2 mm) en agua\n")
+    """Pierna de ``limb_3d`` (tibia y peroné) con fractura transversal, onda plana desde arriba, 3D frente a 2D."""
+    npml = 10
+    frac = Fracture3D(kind="transversal", gap=2e-3)
+    print("\n## 7. Pierna 3D (limb_3d 'pierna', sin rugosidad, fractura transversal de 2 mm en la tibia) en agua\n")
     rows = []
     for f0 in freqs:
-        dx = 1.5e-3 if f0 < 1.5e9 else 0.8e-3
-        npml = 10
-        p_frac = leg_segment(spec, frac, length=40e-3, dx=dx, margin=24e-3)
-        p_int = leg_segment(spec, None, length=40e-3, dx=dx, margin=24e-3)
+        dx, length, x_far = (2e-3, 100e-3, -25e-3) if f0 < 1.5e9 else (1e-3, 80e-3, -25e-3)
+        p_frac = leg_phantom(frac, dx, length, npml + 6)
+        p_int = leg_phantom(None, dx, length, npml + 6)
         g = p_frac.grid
-        meta = p_frac.meta
-        z_skin = meta["skin_depth"]
-        z_bone = meta["bone_top_depth"]
+        z_skin, z_bone = p_frac.meta["skin_depth"], p_frac.meta["bone_top_depth"]
         k_skin = g.index_of(0, 0, z_skin)[0]
-        j0 = g.index_of(0, 0, 0)[1]
-        i0 = g.index_of(0, 0, 0)[2]
-        i_far = g.index_of(-15e-3, 0, 0)[2]
+        j0, i0 = g.index_of(0, 0, 0)[1], g.index_of(0, 0, 0)[2]
+        i_far = g.index_of(x_far, 0, 0)[2]
         out = {}
         for name, ph, pol in (("par_frac", p_frac, "parallel"), ("perp_frac", p_frac, "perpendicular"),
                               ("perp_int", p_int, "perpendicular")):
             s = Maxwell3DSolver(ph, f0, npml=npml)
             s.set_plane_wave(pol, z_ref=z_skin)
-            r = s.run()
-            out[name] = (r, s.memory_bytes()["total"])
-        # 2D: corte transversal (plano y-z en x lejos de la fractura) con E ∥ hueso; longitudinal (y = 0) con E ⊥
-        g2t = Grid2D(g.ny, g.nz, dx, g.y0, g.z0)
-        cross = Phantom(g2t, p_frac.labels[:, :, i_far].copy())
-        longi = p_frac.slice_y(0.0)
-        longi_int = p_int.slice_y(0.0)
+            out[name] = (s.run(), s.memory_bytes()["total"])
+        # 2D TM: corte transversal en x_far (E ∥ hueso) y longitudinal en y = 0 (E ⊥ hueso: capas planas)
         res2 = {}
-        for name, ph in (("cross", cross), ("longi", longi), ("longi_int", longi_int)):
-            s2 = MaxwellTMSolver(ph, f0, npml=20)
-            s2.set_plane_wave_source(z=ph.grid.z0 + 22 * dx)
+        for name, ph in (("cross", p_frac.slice_x(x_far)), ("longi", p_frac.slice_y(0.0)),
+                         ("longi_int", p_int.slice_y(0.0))):
+            s2 = MaxwellTMSolver(ph, f0, npml=npml)
+            s2.set_plane_wave_source(z=ph.grid.z0 + (npml + 3) * dx)
             r2 = s2.run()
-            # Incidente en la piel: misma simulación sin la pierna (todo agua)
-            s0 = MaxwellTMSolver(Phantom(ph.grid, np.full_like(ph.labels, TISSUE_INDEX["water"])), f0, npml=20)
-            s0.set_plane_wave_source(z=ph.grid.z0 + 22 * dx)
-            r0 = s0.run()
-            norm = r0.phasor[k_skin, ph.grid.nx // 2]
-            res2[name] = (r2, norm)
+            # Incidente en la piel: la misma simulación sin la pierna (todo agua)
+            s0 = MaxwellTMSolver(Phantom(ph.grid, np.full_like(ph.labels, TISSUE_INDEX["water"])), f0, npml=npml)
+            s0.set_plane_wave_source(z=ph.grid.z0 + (npml + 3) * dx)
+            res2[name] = (r2, s0.run().phasor[k_skin, ph.grid.nx // 2], ph.labels)
         rows.append(dict(f0=f0, g=g, out=out, res2=res2, k_skin=k_skin, j0=j0, i0=i0, i_far=i_far, z_skin=z_skin,
                          z_bone=z_bone))
         print(f"f = {f0 / 1e9:.3g} GHz, dx = {dx * 1e3:.1f} mm, malla {g.nx}x{g.ny}x{g.nz} = {g.size / 1e6:.2f} M "
               f"celdas, memoria del solver {out['par_frac'][1] / 2 ** 20:.0f} MiB, "
               + ", ".join(f"{k}: {v[0].steps} pasos {v[0].elapsed_s:.0f} s" for k, v in out.items()), flush=True)
-    print("\nNormalización: 1 V/m de onda incidente (en el agua) en el plano de la piel. SAR en W/kg por (V/m)².\n")
-    print("| f | caso | SAR pico | SAR 1 g | SAR 10 g | potencia en hueso/médula | penetración de \\|E\\|² en músculo "
-          "| \\|E\\| en la cortical (eje) |")
+    print("\nNormalización: 1 V/m de onda incidente (en el agua) en el plano de la piel; SAR en W/kg por (V/m)². "
+          "SAR 1 g y 10 g: cubo centrado sólo sobre el tejido (§2.4).\n")
+    print("| f | caso | SAR pico | SAR 1 g | SAR 10 g | potencia en el hueso | potencia a > 2 cm bajo la piel "
+          "| \\|E\\| 2 mm dentro de la cortical (x lejos, y = 0) |")
     print("|---|---|---|---|---|---|---|---|")
     for row in rows:
         f0, g, out, res2, j0, i_far = row["f0"], row["g"], row["out"], row["res2"], row["j0"], row["i_far"]
         z_skin, z_bone = row["z_skin"], row["z_bone"]
-        k_bone = g.index_of(0, 0, z_bone + 1e-3)[0]
+        k_bone = g.index_of(0, 0, z_bone + 2e-3)[0]
         for name, label in (("par_frac", "3D, E ∥ hueso, con fractura"), ("perp_frac", "3D, E ⊥ hueso, con fractura"),
                             ("perp_int", "3D, E ⊥ hueso, sin fractura")):
             r = out[name][0]
-            m = leg_metrics(r)
-            line = r.e_squared[:, j0, i_far]
-            pen = penetration(line, g.z, z_skin, z_bone)
-            print(f"| {f0 / 1e9:.3g} GHz | {label} | {m['sar_peak']:.3e} | {m['sar1']:.3e} | {m['sar10']:.3e} | "
-                  f"{m['p_bone']:.2%} | {pen * 1e3:.1f} mm | {np.sqrt(r.e_squared[k_bone, j0, i_far]):.3f} |")
+            tissue = r.tissue_mask()
+            fb, fd = power_fractions(r.power_density, r.labels, g.z, z_skin)
+            print(f"| {f0 / 1e9:.3g} GHz | {label} | {r.sar[tissue].max():.3e} | {r.averaged_sar(1e-3).max():.3e} | "
+                  f"{r.averaged_sar(10e-3).max():.3e} | {fb:.2%} | {fd:.2%} | "
+                  f"{np.sqrt(r.e_squared[k_bone, j0, i_far]):.3f} |")
         for name, label in (("cross", "2D TM transversal (E ∥ hueso)"),
                             ("longi", "2D TM longitudinal (E ⊥ hueso, capas planas)")):
-            r2, norm = res2[name]
-            e2 = np.abs(r2.phasor / norm) ** 2
-            g2 = r2.phasor.shape
-            c = g2[1] // 2 if name == "cross" else int(np.argmin(np.abs(g.x - (-15e-3))))
-            pen = penetration(e2[:, c], g.z, z_skin, z_bone)
-            sar2 = r2.sar / np.abs(norm) ** 2
-            print(f"| {f0 / 1e9:.3g} GHz | {label} | {sar2.max():.3e} | - | - | - | {pen * 1e3:.1f} mm | "
-                  f"{np.sqrt(e2[k_bone, c]):.3f} |")
+            r2, norm, labels2 = res2[name]
+            n2 = abs(norm) ** 2
+            fb, fd = power_fractions(0.5 * r2.sigma * np.abs(r2.phasor) ** 2, labels2, g.z, z_skin)
+            c = j0 if name == "cross" else i_far
+            print(f"| {f0 / 1e9:.3g} GHz | {label} | {(r2.sar / n2).max():.3e} | - | - | {fb:.2%} | {fd:.2%} | "
+                  f"{abs(r2.phasor[k_bone, c] / norm):.3f} |")
     print("\n### 3D frente a 2D (mismo plano, misma normalización)\n")
-    print("| f | comparación | \\|E\\| en el eje: diferencia máx. (piel-cortical) | SAR máx. en el plano 3D/2D "
-          "| contraste de la fractura en \\|E\\| (gap) 3D | 2D |")
+    print("| f | comparación | \\|E\\| en la vertical y = 0: diferencia máx. (piel - 2 mm en la cortical) "
+          "| SAR máx. del plano 3D/2D | contraste de la fractura en \\|E\\| (centro del hueco) 3D | 2D |")
     print("|---|---|---|---|---|---|")
     for row in rows:
         f0, g, out, res2, j0, i0, i_far = (row[k] for k in ("f0", "g", "out", "res2", "j0", "i0", "i_far"))
         k_skin, z_bone = row["k_skin"], row["z_bone"]
-        k_bone = g.index_of(0, 0, z_bone + 1e-3)[0]
+        k_bone = g.index_of(0, 0, z_bone + 2e-3)[0]
         zsel = slice(k_skin, k_bone + 1)
-        # Transversal: plano x = x_far del 3D E ∥ frente al 2D transversal
         r3 = out["par_frac"][0]
-        r2, norm = res2["cross"]
+        r2, norm, _ = res2["cross"]
         e3 = np.sqrt(r3.e_squared[:, :, i_far])
         e2 = np.abs(r2.phasor / norm)
         d = np.abs(e3[zsel, j0] - e2[zsel, j0]).max() / e2[zsel, j0].max()
-        s3 = r3.sar[:, :, i_far].max()
-        s2 = (r2.sar / np.abs(norm) ** 2).max()
-        print(f"| {f0 / 1e9:.3g} GHz | E ∥ hueso: 3D (lejos de la fractura) frente a 2D transversal | {d:.2%} | "
-              f"{s3 / s2:.3f} | - | - |")
-        # Longitudinal: plano y = 0 del 3D E ⊥ frente al 2D longitudinal (E ⊥ hueso)
+        tissue2 = ~np.isin(r3.labels[:, :, i_far], [TISSUE_INDEX["water"]])
+        s3 = r3.sar[:, :, i_far][tissue2].max()
+        s2 = (r2.sar / abs(norm) ** 2)[tissue2].max()
+        print(f"| {f0 / 1e9:.3g} GHz | E ∥ hueso: 3D en x = {g.x[i_far] * 1e3:.0f} mm frente a 2D transversal | "
+              f"{d:.2%} | {s3 / s2:.3f} | - | - |")
         r3, r3i = out["perp_frac"][0], out["perp_int"][0]
-        r2, norm = res2["longi"]
-        r2i, norm_i = res2["longi_int"]
+        r2, norm, _ = res2["longi"]
+        r2i, norm_i, _ = res2["longi_int"]
         e3 = np.sqrt(r3.e_squared[:, j0, :])
         e2 = np.abs(r2.phasor / norm)
         d = np.abs(e3[zsel, i_far] - e2[zsel, i_far]).max() / e2[zsel, i_far].max()
-        s3 = r3.sar[:, j0, :].max()
-        s2 = (r2.sar / np.abs(norm) ** 2).max()
-        # Contraste de la fractura: |E| en el centro del hueco (cortical superior) con y sin fractura
-        k_gap = g.index_of(0, 0, z_bone + 2e-3)[0]
-        c3 = np.sqrt(r3.e_squared[k_gap, j0, i0]) / np.sqrt(r3i.e_squared[k_gap, j0, i0]) - 1
-        c2 = abs(r2.phasor[k_gap, i0] / norm) / abs(r2i.phasor[k_gap, i0] / norm_i) - 1
-        print(f"| {f0 / 1e9:.3g} GHz | E ⊥ hueso: 3D (y = 0) frente a 2D longitudinal | {d:.2%} | {s3 / s2:.3f} | "
+        tissue2 = ~np.isin(r3.labels[:, j0, :], [TISSUE_INDEX["water"]])
+        s3 = r3.sar[:, j0, :][tissue2].max()
+        s2 = (r2.sar / abs(norm) ** 2)[tissue2].max()
+        c3 = np.sqrt(r3.e_squared[k_bone, j0, i0] / r3i.e_squared[k_bone, j0, i0]) - 1
+        c2 = abs(r2.phasor[k_bone, i0] / norm) / abs(r2i.phasor[k_bone, i0] / norm_i) - 1
+        print(f"| {f0 / 1e9:.3g} GHz | E ⊥ hueso: 3D en y = 0 frente a 2D longitudinal | {d:.2%} | {s3 / s2:.3f} | "
               f"{c3:+.1%} | {c2:+.1%} |")
 
 
